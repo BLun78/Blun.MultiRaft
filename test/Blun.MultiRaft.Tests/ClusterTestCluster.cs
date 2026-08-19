@@ -7,6 +7,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Globalization;
 using Blun.MultiRaft.Cluster;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Transport;
@@ -40,12 +41,24 @@ internal sealed class ClusterTestNode : IAsyncDisposable
         Self = new NodeId(id);
         _dataDirectory = dataDirectory;
 
+        // File-backed when a directory is given, in memory otherwise — and the file-backed path is not
+        // decoration. The two logs are separate implementations behind one interface, and a divergence
+        // between them is exactly the class of bug the shared WAL contract suite exists to catch; a cluster
+        // exercised only in memory would not notice one.
+        bool onDisk = dataDirectory is not null;
+
         Host = new MultiRaftHost(
             Self,
-            new InMemoryRaftWalFactory(),
-            new InMemoryRaftMetaStore(),
+            onDisk
+                ? new SegmentedRaftWalFactory(Path.Combine(dataDirectory!, "wal"))
+                : new InMemoryRaftWalFactory(),
+            onDisk
+                ? new FileRaftMetaStore(Path.Combine(dataDirectory!, "meta"))
+                : new InMemoryRaftMetaStore(),
             transport,
-            new InMemoryRaftSnapshotStore(),
+            onDisk
+                ? new FileRaftSnapshotStore(Path.Combine(dataDirectory!, "snapshots"))
+                : new InMemoryRaftSnapshotStore(),
             tickInterval: TimeSpan.FromMilliseconds(10));
 
         Coordinator = new ClusterCoordinator(
@@ -143,6 +156,19 @@ internal sealed class ClusterTestCluster : IAsyncDisposable
 
     public ClusterTestNode Node(ulong id) => _nodes.First(n => n.Self.Value == id);
 
+    private readonly string? _root;
+
+    /// <summary>In-memory stores.</summary>
+    public ClusterTestCluster()
+    {
+    }
+
+    /// <summary>File-backed stores under a temporary root, so the segmented log is the one under test.</summary>
+    public ClusterTestCluster(bool onDisk)
+        => _root = onDisk
+            ? Path.Combine(Path.GetTempPath(), "blun-cluster-" + Guid.NewGuid().ToString("N"))
+            : null;
+
     public ValueTask AddNodesAsync(params ulong[] ids) => AddNodesAsync(null, ids);
 
     /// <summary>
@@ -157,7 +183,13 @@ internal sealed class ClusterTestCluster : IAsyncDisposable
         {
             ClusterTestNode node = null!;
             IRaftProtocolTransport transport = Network.Connect(new NodeId(id), new LazyClusterListener(() => node));
-            node = new ClusterTestNode(id, ClusterMode.Replicated, transport, all, stateMachine?.Invoke(id));
+            node = new ClusterTestNode(
+                id,
+                ClusterMode.Replicated,
+                transport,
+                all,
+                stateMachine?.Invoke(id),
+                _root is null ? null : Path.Combine(_root, "node-" + id.ToString(CultureInfo.InvariantCulture)));
             _nodes.Add(node);
             await node.StartAsync();
         }

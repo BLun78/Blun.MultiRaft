@@ -399,3 +399,35 @@ public sealed class ReservedGroupIdTests
         Assert.NotEqual(default, RaftGroupId.Cluster);
     }
 }
+
+/// <summary>
+/// The same cluster, on the segmented log rather than the in-memory one.
+/// </summary>
+/// <remarks>
+/// Not redundant with <see cref="ClusterCoordinatorTests"/>. The two logs are separate implementations of one
+/// interface, and this repository already has a shared WAL contract suite precisely because a divergence
+/// between them is easy to introduce and invisible from either side alone. A cluster is a heavier consumer of
+/// that interface than the contract suite is — it drives truncation, replay and the consistency check through
+/// real replication — so it is worth running against both.
+/// </remarks>
+public sealed class ClusterOnSegmentedLogTests
+{
+    [Fact]
+    public async Task AColdClusterFormsAndEveryNodeAgreesOnTheVoterSet()
+    {
+        await using var cluster = new ClusterTestCluster(onDisk: true);
+        await cluster.AddNodesAsync(3, 1, 2);
+
+        await ClusterTestCluster.WaitUntilAsync(
+            () => cluster.Nodes.All(n => n.Coordinator.Group!.Membership.Voters.Length == 3),
+            "every node to see the whole voter set on a file-backed log",
+            TimeSpan.FromSeconds(30));
+
+        foreach (ClusterTestNode node in cluster.Nodes)
+        {
+            Assert.Equal<NodeId>(
+                [new(1), new(2), new(3)],
+                [.. node.Coordinator.Group!.Membership.Voters.OrderBy(v => v)]);
+        }
+    }
+}

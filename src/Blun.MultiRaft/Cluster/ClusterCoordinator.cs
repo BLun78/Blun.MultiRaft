@@ -46,6 +46,12 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     private long _reportSequence;
     private bool _disposed;
 
+    // Set on a seed until its own voter status has been written to the log. Retried rather than attempted
+    // once: the coordinator's opening campaign races the host's tick loop, which may already have queued one
+    // of its own for this group, and whichever loses leaves IsLeader false at exactly the moment a one-shot
+    // attempt would look.
+    private bool _selfMembershipPending;
+
     // What the cluster leader last saw as available, so the actionable event fires on the change rather than
     // on every pass. Seeded silently when this node takes over, or a fresh leader would announce the whole
     // cluster as newly arrived.
@@ -180,7 +186,17 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             ClusterLog.ModeNotDurable(_logger, _options.Self.Value);
         }
 
-        bool seed = ShouldSeed(previous);
+        // "Has this node ever run before" is the only question that decides how it starts, and the marker is
+        // the one answer to it that cannot race. Asking the log instead -- has it any entries yet -- looks
+        // equivalent and is not: the host's tick loop is already running by the time this method is reached,
+        // so it can campaign the group and append a term's no-op between the group being added and the
+        // length being read.
+        bool fresh = previous is null;
+        bool seed = fresh && ShouldSeed();
+
+        // A node with history passes an empty configuration and lets its own log say who votes. Replay
+        // applies membership entries over whatever is handed in, so anything passed here would be a second
+        // opinion competing with the record -- and the record is the one every other node also rebuilds from.
         RaftMembership membership = seed ? RaftMembership.OfVoters(_options.Self) : RaftMembership.Empty;
 
         _group = await _host.AddGroupCoreAsync(
@@ -199,31 +215,22 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             seed,
             _options.EffectiveNodes.Length);
 
-        // Captured before the campaign, which appends a no-op of its own: this is asking whether the group
-        // has any history at all, not whether it has one a moment from now.
-        bool freshLog = _group.LastIndex == 0;
-
         if (seed)
         {
-            // Campaigning outright rather than waiting out an election timeout. A seed is the only voter it
-            // knows of, so the round is decided without a single message going anywhere.
-            await _group.CampaignAsync(cancellationToken).ConfigureAwait(false);
+            // The seed's own voter status has to reach the log, and until it does the configuration is
+            // asymmetric in a way that stays hidden: this node is a voter because StartAsync was handed a
+            // configuration saying so, and nothing in the log says it. Every node joining later rebuilds the
+            // configuration by replaying membership entries -- that is the whole mechanism -- so it would see
+            // the nodes this one added and not this one. Two views of who votes is two different quorums, and
+            // the disagreement is silent until it decides an election.
+            _selfMembershipPending = true;
 
-            if (freshLog && _group.IsLeader)
-            {
-                // Write the seed's own voter status into the log, as an ordinary membership entry.
-                //
-                // Without this the configuration is asymmetric in a way that does not show up until later:
-                // the seed is a voter because StartAsync was handed a configuration saying so, and nothing in
-                // the log says it. Every node that joins afterwards rebuilds the configuration by replaying
-                // membership entries -- that is the whole mechanism -- so it would see the nodes that were
-                // added and promoted, and not the one that added them. Two views of who votes means two
-                // different quorums, and the disagreement is silent until it decides an election.
-                //
-                // Idempotent by construction: applying PromoteToVoter to a node that already votes changes
-                // nothing, so a restart that reaches here again costs one dead entry rather than a wrong one.
-                await _group.PromoteToVoterAsync(Self, cancellationToken).ConfigureAwait(false);
-            }
+            // Campaigning outright rather than waiting out an election timeout. A seed is the only voter it
+            // knows of, so the round is decided without a single message going anywhere. Only a genuinely
+            // new node does this: a node with history starts as an ordinary follower and campaigns on its
+            // timer like everyone else, rather than forcing an election on the cluster at every restart.
+            await _group.CampaignAsync(cancellationToken).ConfigureAwait(false);
+            await WriteSelfMembershipAsync(_group, cancellationToken).ConfigureAwait(false);
         }
 
         _loop = Task.Run(CoordinationLoopAsync, CancellationToken.None);
@@ -412,18 +419,19 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     /// node that actually had the log. Starting empty-handed and waiting to be adopted removes that
     /// possibility rather than making it unlikely.
     /// <list type="bullet">
-    /// <item>Has run before — its own log holds the real configuration, which replay restores over whatever
-    /// is passed here. Seeding as a voter keeps a former single-node cluster leading itself.</item>
-    /// <item>Fresh, single-node — the only node there is.</item>
-    /// <item>Fresh, replicated, lowest id — somebody has to start a cold cluster, and the lowest id is the
-    /// one choice every node agrees on without being told.</item>
-    /// <item>Fresh, replicated, any other id — waits. If the seed is down the cluster does not form, which
-    /// is correct: there is no data yet to be unavailable, and it forms as soon as the seed appears.</item>
+    /// <item>Single-node — the only node there is.</item>
+    /// <item>Replicated, lowest id — somebody has to start a cold cluster, and the lowest id is the one
+    /// choice every node reaches without being told.</item>
+    /// <item>Replicated, any other id — waits. If the seed is down the cluster does not form, which is
+    /// correct: there is no data yet to be unavailable, and it forms as soon as the seed appears.</item>
     /// </list>
+    /// <para>
+    /// Only ever asked of a node with no history. One that has run before takes its configuration from its
+    /// own log and starts as an ordinary follower, whatever its id.
+    /// </para>
     /// </remarks>
-    private bool ShouldSeed(ClusterModeMarker? previous)
-        => previous is not null
-           || _options.Mode == ClusterMode.SingleNode
+    private bool ShouldSeed()
+        => _options.Mode == ClusterMode.SingleNode
            || _options.Self == _options.EffectiveNodes.Min();
 
     private async ValueTask<LeaderTargetResponse> ResolveAsync(
@@ -677,6 +685,10 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         timeout.CancelAfter(_options.ReconcileInterval);
         CancellationToken token = timeout.Token;
 
+        // Before anything else. Until this lands, every node adopted below rebuilds a configuration that is
+        // missing the node adopting it.
+        await WriteSelfMembershipAsync(group, token).ConfigureAwait(false);
+
         RaftMembership membership = group.Membership;
 
         foreach (NodeId node in _options.EffectiveNodes)
@@ -708,6 +720,32 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         }
 
         RaiseAvailability(group);
+    }
+
+    /// <summary>
+    /// Records the seed's own voter status as an ordinary membership entry, once it is actually leading.
+    /// </summary>
+    /// <remarks>
+    /// Retried from the reconciliation pass rather than attempted once at startup. The opening campaign
+    /// races the tick loop's own queued campaign for the same group, so whether this node is leading at any
+    /// particular instant after <c>CampaignAsync</c> returns is not something to build on — but leading
+    /// eventually is, and one pass later costs nothing because a membership entry applies wherever it lands
+    /// in the order.
+    /// <para>
+    /// Idempotent by construction: promoting a node that already votes changes nothing, so a duplicate would
+    /// be a dead entry rather than a wrong one.
+    /// </para>
+    /// </remarks>
+    private async ValueTask WriteSelfMembershipAsync(RaftGroupInstance group, CancellationToken cancellationToken)
+    {
+        if (!_selfMembershipPending || !group.IsLeader)
+        {
+            return;
+        }
+
+        await group.PromoteToVoterAsync(Self, cancellationToken).ConfigureAwait(false);
+        _selfMembershipPending = false;
+        ClusterLog.SeedRecorded(_logger, Self.Value);
     }
 
     private void RaiseAvailability(RaftGroupInstance group)
@@ -830,4 +868,10 @@ internal static partial class ClusterLog
         Level = LogLevel.Warning,
         Message = "A cluster coordination pass on node {Node} failed.")]
     public static partial void PassFailed(ILogger logger, Exception exception, ulong node);
+
+    [LoggerMessage(
+        EventId = 1208,
+        Level = LogLevel.Information,
+        Message = "Seed node {Node} recorded its own voter status in the cluster group's log.")]
+    public static partial void SeedRecorded(ILogger logger, ulong node);
 }

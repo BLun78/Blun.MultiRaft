@@ -45,8 +45,13 @@ public sealed partial class RaftGroupInstance
         [LoggerMessage(
             EventId = 1004,
             Level = LogLevel.Information,
-            Message = "Raft group {Group}: membership change {Change} for node {Node}.")]
-        public static partial void MembershipChanged(ILogger logger, ulong group, string change, ulong node);
+            Message = "Raft group {Group}: applied membership change {Change} for node {Node}; {VoterCount} voters now.")]
+        public static partial void MembershipChanged(
+            ILogger logger,
+            ulong group,
+            string change,
+            ulong node,
+            int voterCount);
 
         [LoggerMessage(
             EventId = 1005,

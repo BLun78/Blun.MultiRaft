@@ -79,6 +79,10 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     private int _campaignInFlight;
 
     /// <summary>Creates a group instance. It does nothing until <see cref="StartAsync"/> is called.</summary>
+    /// <remarks>
+    /// Takes ownership of <paramref name="wal"/> and disposes it with itself. Nothing else may write to that
+    /// log while this group is alive, so sharing one would corrupt it either way.
+    /// </remarks>
     public RaftGroupInstance(
         RaftGroupId group,
         NodeId self,
@@ -962,6 +966,14 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         }
 
         _commitWaiters.Clear();
+
+        // The log is disposed here because this instance owns it: it is handed one at construction, nothing
+        // else may write to it while the group lives, and the two lifetimes are the same. Leaving it open
+        // leaked a file handle per group on every host shutdown — on Windows that keeps the segment files
+        // locked, so a group's directory could not be removed afterwards, and on Unix it is a quieter
+        // descriptor leak that only shows up at scale.
+        await _wal.DisposeAsync().ConfigureAwait(false);
+
         _shutdown.Dispose();
         _stateGate.Dispose();
         _applyGate.Dispose();
@@ -1036,8 +1048,8 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     private async ValueTask AppendMembershipAsync(MembershipChange change, CancellationToken cancellationToken)
     {
         byte[] payload = change.ToPayload();
-        await AppendCoreAsync(RaftEntryKind.Membership, payload, applicationTag: 0, cancellationToken).ConfigureAwait(false);
-        Log.MembershipChanged(_logger, Group.Value, change.Kind.ToString(), change.Node.Value);
+        await AppendCoreAsync(RaftEntryKind.Membership, payload, applicationTag: 0, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1923,6 +1935,17 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     {
         RaftMembership updated = Membership.Apply(change);
         Volatile.Write(ref _membership, updated);
+
+        // Logged where the change takes effect rather than where it is appended. Only the leader appends, so
+        // logging there says what the leader intended and nothing about what any follower actually adopted --
+        // and a configuration that has diverged between nodes is exactly the failure this line has to be able
+        // to show.
+        Log.MembershipChanged(
+            _logger,
+            Group.Value,
+            change.Kind.ToString(),
+            change.Node.Value,
+            updated.Voters.Length);
 
         if (Role == RaftRole.Leader)
         {
