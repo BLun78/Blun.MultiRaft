@@ -76,6 +76,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     private bool _started;
     private bool _disposed;
     private int _compactionInFlight;
+    private int _campaignInFlight;
 
     /// <summary>Creates a group instance. It does nothing until <see cref="StartAsync"/> is called.</summary>
     public RaftGroupInstance(
@@ -699,8 +700,63 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         // Learners never campaign: they have no vote to cast and winning would be meaningless.
         if (Role != RaftRole.Learner && now >= Volatile.Read(ref _electionDeadline))
         {
-            await CampaignAsync(cancellationToken).ConfigureAwait(false);
+            StartCampaign();
         }
+
+        await ValueTask.CompletedTask.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Queues an election rather than running one on the caller's stack.
+    /// </summary>
+    /// <remarks>
+    /// The caller is the host's shared tick loop, and it awaits each group in turn. Campaigning inline puts
+    /// the whole of <see cref="CampaignAsync(CancellationToken)"/> on that stack — including
+    /// <see cref="BecomeLeaderAsync"/>, which appends the term's no-op and, at
+    /// <see cref="DurabilityLevel.Quorum"/>, waits for it to commit. A winner that cannot reach a majority
+    /// therefore stops the clock for <em>every</em> group on the node: no heartbeats anywhere, and the loop
+    /// never gets back to observing shutdown. Observed as a test run that sat idle indefinitely, with the
+    /// tick loop parked in <c>WaitForCommitAsync</c>.
+    /// <para>
+    /// This is the same fix, for the same reason, that peer replication and automatic compaction already
+    /// carry: work whose duration is set by the rest of the cluster does not belong on the clock's stack.
+    /// The election deadline is re-armed by the caller before queuing, so a tick that fires while a campaign
+    /// is still running does not see the same expired deadline again, and the in-flight flag makes sure only
+    /// one runs at a time.
+    /// </para>
+    /// </remarks>
+    private void StartCampaign()
+    {
+        // Re-armed before queuing, not inside the campaign: otherwise the next tick arrives before
+        // CampaignAsync has run far enough to move the deadline, and fires a second one behind this.
+        ArmElectionTimer();
+
+        if (Interlocked.CompareExchange(ref _campaignInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await CampaignAsync(skipPreVote: false, _shutdown.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Shutting down.
+                }
+                catch (Exception ex) when (ex is IOException or InvalidOperationException)
+                {
+                    Log.ElectionFailed(_logger, ex, Group.Value, Self.Value);
+                }
+                finally
+                {
+                    Volatile.Write(ref _campaignInFlight, 0);
+                }
+            },
+            _shutdown.Token);
     }
 
     /// <summary>Starts an election immediately, skipping the timer. Used for bootstrap and for leader transfer.</summary>

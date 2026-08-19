@@ -199,11 +199,31 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             seed,
             _options.EffectiveNodes.Length);
 
+        // Captured before the campaign, which appends a no-op of its own: this is asking whether the group
+        // has any history at all, not whether it has one a moment from now.
+        bool freshLog = _group.LastIndex == 0;
+
         if (seed)
         {
             // Campaigning outright rather than waiting out an election timeout. A seed is the only voter it
             // knows of, so the round is decided without a single message going anywhere.
             await _group.CampaignAsync(cancellationToken).ConfigureAwait(false);
+
+            if (freshLog && _group.IsLeader)
+            {
+                // Write the seed's own voter status into the log, as an ordinary membership entry.
+                //
+                // Without this the configuration is asymmetric in a way that does not show up until later:
+                // the seed is a voter because StartAsync was handed a configuration saying so, and nothing in
+                // the log says it. Every node that joins afterwards rebuilds the configuration by replaying
+                // membership entries -- that is the whole mechanism -- so it would see the nodes that were
+                // added and promoted, and not the one that added them. Two views of who votes means two
+                // different quorums, and the disagreement is silent until it decides an election.
+                //
+                // Idempotent by construction: applying PromoteToVoter to a node that already votes changes
+                // nothing, so a restart that reaches here again costs one dead entry rather than a wrong one.
+                await _group.PromoteToVoterAsync(Self, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         _loop = Task.Run(CoordinationLoopAsync, CancellationToken.None);

@@ -123,5 +123,11 @@ public sealed partial class RaftGroupInstance
             Level = LogLevel.Warning,
             Message = "Raft group {Group}: node {Node} lost contact with a majority in term {Term} and stepped aside.")]
         public static partial void QuorumContactLost(ILogger logger, ulong group, ulong node, long term);
+
+        [LoggerMessage(
+            EventId = 1016,
+            Level = LogLevel.Warning,
+            Message = "Raft group {Group}: an election started by node {Node} failed.")]
+        public static partial void ElectionFailed(ILogger logger, Exception exception, ulong group, ulong node);
     }
 }

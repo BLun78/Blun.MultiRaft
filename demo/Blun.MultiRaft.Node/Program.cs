@@ -76,6 +76,12 @@ builder.Services.AddSingleton<RaftNodeHost>(provider => new RaftNodeHost(
 
 builder.Services.AddSingleton<IRaftProtocolListener>(
     provider => provider.GetRequiredService<RaftNodeHost>());
+
+// Registered separately so the gRPC session can discover it with an `is` check: load reports and
+// leadership-target questions travel the same multiplexed stream, but a listener that does not handle them
+// still works, it simply has no cluster plane.
+builder.Services.AddSingleton<IRaftClusterListener>(
+    provider => provider.GetRequiredService<RaftNodeHost>());
 builder.Services.AddHostedService(provider => provider.GetRequiredService<RaftNodeHost>());
 
 WebApplication app = builder.Build();
@@ -84,5 +90,15 @@ app.MapGrpcService<RaftProtocolService>();
 
 // The whole point of the scenario: watch three nodes agree on one leader, over a real network.
 app.MapGet("/status", (RaftNodeHost host) => Results.Json(host.Describe()));
+
+// What the cluster leader believes each node is carrying. Empty on the other two, which is the honest
+// answer -- reports are pushed to the leader and nobody else has a picture to offer.
+app.MapGet("/cluster/load", (RaftNodeHost host) => Results.Json(host.DescribeLoad()));
+
+// Placement, driven from outside. The library never moves a leader on its own; this is the door it moves
+// through. `node` may be omitted to let the group's leader pick the best-placed candidate itself.
+app.MapPost(
+    "/cluster/groups/{group:long}/leader",
+    async (RaftNodeHost host, ulong group, ulong? node) => Results.Json(await host.RequestLeaderAsync(group, node)));
 
 app.Run();

@@ -79,6 +79,21 @@ public sealed class ClusterCoordinatorTests
         {
             Assert.Equal(ClusterServiceState.Available, cluster.Node(id).Coordinator.State);
         }
+
+        // And every node has to agree on who votes, the seed included. The joining nodes rebuild the
+        // configuration by replaying membership entries, so a seed whose own voter status exists only in the
+        // configuration it was handed at startup -- and not in the log -- is invisible to them. That
+        // disagreement is silent right up until it decides an election with the wrong quorum.
+        await ClusterTestCluster.WaitUntilAsync(
+            () => cluster.Nodes.All(n => n.Coordinator.Group!.Membership.Voters.Length == 3),
+            "every node to see the whole voter set, seed included",
+            TimeSpan.FromSeconds(20));
+
+        foreach (ClusterTestNode node in cluster.Nodes)
+        {
+            ImmutableArray<NodeId> voters = node.Coordinator.Group!.Membership.Voters;
+            Assert.Equal<NodeId>([new(1), new(2), new(3)], [.. voters.OrderBy(v => v)]);
+        }
     }
 
     [Fact]
