@@ -12,7 +12,13 @@ dotnet run -c Release --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRa
 Targets `net10.0;net11.0`. MIT licensed.
 
 **Usage docs** (the "how do I call this" companion to the design notes below): [doc/wal-usage.md](doc/wal-usage.md),
-[doc/grpc-usage.md](doc/grpc-usage.md), [doc/raft-usage.md](doc/raft-usage.md).
+[doc/grpc-usage.md](doc/grpc-usage.md), [doc/raft-usage.md](doc/raft-usage.md),
+[doc/cluster-usage.md](doc/cluster-usage.md).
+
+> **Note on the benchmark sources.** Both benchmark projects were lost to an accident and rewritten from
+> their documented behaviour rather than recovered. Every measurement below has been re-run against the
+> rewritten harness on one machine; the qualitative conclusions are unchanged, the absolute numbers are not
+> comparable with any figure quoted before this note existed.
 
 ## Platform support
 
@@ -61,6 +67,10 @@ runs cleanly on Linux and macOS specifically remains unverified until something 
   leader. Removal is one entry.
 - **Pre-vote.** On by default (Raft §9.6). A node that was partitioned away cannot force a healthy group
   through a needless election when it comes back.
+- **Cluster management, without a placement policy.** One reserved group holds the node set and whatever
+  administration means to the host. It answers *is this node a legal target for that group's leadership* and
+  *who is carrying least* — and moves a leader only when asked to. Nothing rebalances on a timer. See
+  [doc/cluster-usage.md](doc/cluster-usage.md).
 
 ## Layout
 
@@ -79,7 +89,8 @@ core for the same reason: a log is keyed by group, and `IRaftWalFactory` has to 
 a group *does*.
 
 Inside the core, `Core/` holds the group instance and its state, `Transport/` the wire contracts and an
-in-process cluster, `Hosting/` the per-node host and its shared clock.
+in-process cluster, `Hosting/` the per-node host and its shared clock, `Cluster/` the cluster-management
+group and the placement API built on it.
 
 ## Design decisions worth knowing
 
@@ -134,22 +145,25 @@ setup measured and excluded):
 
 | Groups | Multiplexed (steady) | Per-group setup | Per-group (steady) | Ratio |
 |---|---|---|---|---|
-| 10 | 19.0 ms | 0.2 ms | 23.4 ms | 1.23x |
-| 100 | 125.2 ms | 1.4 ms | 84.0 ms | 0.67x |
-| 500 | 462.3 ms | 27.0 ms | 404.4 ms | 0.87x |
-| 2000 | 3544.1 ms | 408.9 ms | 3315.3 ms | 0.94x |
+| 10 | 1.4 ms | 149.6 ms | 4.4 ms | 3.08x |
+| 100 | 10.2 ms | 289.3 ms | 23.6 ms | 2.31x |
+| 500 | 72.9 ms | 1362.3 ms | 49.9 ms | 0.69x |
+| 2000 | 227.8 ms | 4272.6 ms | 122.0 ms | 0.54x |
 
-Ratio is per-group-steady over multiplexed-steady; above 1 favors multiplexing. At every group count
-measured here it is at or below 1 — the dedicated-stream arm was never slower in steady-state throughput, and
-was sometimes faster. Localhost, .NET's gRPC client and server, an empty-payload heartbeat-shaped request —
-this does not rule out the effect showing up on a real network, with real payloads, or well past 2000 groups,
-but it means the HPACK/flow-control argument is not a demonstrated fact the way the WAL numbers above are; it
-is exactly what it was called then — an argument — and should be described that way, not as settled.
+Ratio is per-group-steady over multiplexed-steady; above 1 favors multiplexing. It **crosses over**: at ten
+and a hundred groups multiplexing is two to three times faster, and by five hundred the dedicated-stream arm
+has overtaken it and stays ahead. So the honest summary is that neither arm wins outright, and the one that
+wins depends on the group count — which is the opposite of the original claim, that multiplexing wins and
+wins harder as groups multiply. Localhost, .NET's gRPC client and server, an empty-payload heartbeat-shaped
+request: this does not rule out the effect showing up on a real network, with real payloads, or well past
+2000 groups, but it means the HPACK/flow-control argument is not a demonstrated fact the way the WAL numbers
+above are. It is exactly what it was called then — an argument — and should be described that way.
 
 Two things this benchmark does show, and that motivate keeping the multiplexed design regardless: connection
-*setup* cost is real and scales with group count (409 ms to open 2000 channels, versus 3.5 s of steady-state
-work — not dominant here, but not free, and it recurs every time a per-group connection needs re-establishing,
-where the multiplexed session amortizes it once per node pair). And this benchmark does not measure the
+*setup* cost is real, scales with group count, and is now the dominant term rather than a footnote — 4.3 s to
+open 2000 channels against 122 ms of steady-state work, so setup costs thirty-five times what the round trips
+it enables do. It recurs every time a per-group connection needs re-establishing, where the multiplexed
+session amortizes it once per node pair. And this benchmark does not measure the
 separate, likely more important claim at real scale: whether a node can hold thousands of concurrent TCP
 connections and HTTP/2 stream objects open at all without hitting OS-level resource limits — a question about
 survivability under load, not about the latency of any single round trip. That question remains unmeasured
@@ -178,34 +192,70 @@ Skipping pre-vote there is what makes a deliberate handoff resolve in one round 
 window despite every voter already knowing, from the transfer itself, that the new election is legitimate.
 Found by a test intermittently timing out at 5 seconds rather than by inspection.
 
+**The cluster is a Raft group like any other, and its voter set is the node set.** One reserved id
+(`RaftGroupId.Cluster`, `ulong.MaxValue` — not 0, because that is `default(RaftGroupId)` and an uninitialized
+struct must not address the administrative plane) carries node membership as ordinary `Membership` entries
+and whatever administration means to the host as `Command` entries on the same log. Adding a node to the
+cluster is therefore adding a voter, through the single-server-change path that already exists, rather than
+through a second membership mechanism that would have to be kept in agreement with the first.
+
+**A fresh node starts with no configuration and waits to be adopted.** This is the one part of the bootstrap
+that is not a convenience. Under the election restriction two empty logs are exactly as complete as each
+other, so two fresh voters will elect one of themselves — and if some third node in that set actually held
+data, the winner's empty log would truncate it away. Starting empty-handed removes that outcome instead of
+making it unlikely. A cold cluster is seeded by the lowest node id, the one choice every node reaches without
+being told, and the seed writes its own voter status into the log rather than only holding it in the
+configuration it was started with: joining nodes rebuild membership by replaying entries, so a seed that
+never logged itself is a seed they cannot see, and two views of who votes is two different quorums.
+
+**Single-node to replicated is allowed and needs no mechanism; the reverse is refused.** The node that ran
+alone holds the log and the nodes joining it hold nothing, so the election restriction settles which log wins
+without being asked. Going the other way would make a node pulled out of a cluster a second authority on the
+same group ids, with two real committed histories and no rule that reconciles them — so it is refused at
+startup, from a marker the node writes next to its data, rather than discovered later.
+
+**Placement is a question the library answers, not a decision it makes.** Nothing rebalances on a timer or a
+threshold. The coordinator will tell you whether a node is a legal target for a group's leadership — a
+judgement only that group's current leader can make, since it rests on per-peer match indices — and which
+node is carrying the fewest leaderships, and it will carry out a handover when asked. Load reports are pushed
+to the cluster leader and held in memory, never put through the log: leader counts change on every election
+of every group, and replicating them would turn an advisory number into a write firehose on the one group
+that has to stay responsive. The actionable event, `NodeBecameAvailable`, is raised on the cluster leader
+alone — if every node raised it, every node's consumer would decide to re-place the same groups at the same
+instant.
+
 ## Measurements
 
 Append path, `--job short`, fsync disabled so the disk flush does not swamp everything else. Short-job
 variance is high — the 4 KB batch figures in particular have a standard deviation in the tens of
 microseconds — so read the ratios, not the absolutes.
 
-| Payload | Access | Single | Batch of 32, per entry | Alloc/append |
+.NET 10 and .NET 11 in one invocation, as the benchmark defaults to. Both runtimes agree within the noise
+here, so one column each is shown rather than two.
+
+| Payload | Access | Single (net10 / net11) | Batch of 32, per entry | Alloc/append |
 |---|---|---|---|---|
-| 64 B | RandomAccess | 10.2 µs | 0.43 µs | 613 B |
-| 64 B | MemoryMapped | **0.14 µs** | 0.10 µs | 137 B |
-| 4096 B | RandomAccess | 37.2 µs | 2.92 µs | 670 B |
-| 4096 B | MemoryMapped | **3.0 µs** | 3.06 µs | 112 B |
+| 64 B | RandomAccess | 19.7 / 23.4 µs | 0.86 / 0.83 µs | 58 B |
+| 64 B | MemoryMapped | **0.25 / 0.23 µs** | 0.18 / 0.17 µs | 132 B |
+| 4096 B | RandomAccess | 23.5 / 25.8 µs | 2.94 / 2.29 µs | 680 B |
+| 4096 B | MemoryMapped | **4.17 / 4.17 µs** | 4.25 / 4.31 µs | 112 B |
 
 Three things worth reading out of this.
 
-**Mapping the segment is worth 70x on a small single append** (10.2 µs to 0.14 µs) and 12x on a 4 KB one.
-That is the syscall, and nothing else: the work done per append is otherwise identical.
+**Mapping the segment is worth about 80x on a small single append** (19.7 µs to 0.25 µs) and roughly 6x on a
+4 KB one. That is the syscall, and nothing else: the work done per append is otherwise identical. The gap
+narrows with payload size because at 4 KB the copy starts to matter next to the call itself.
 
-**Batching and mapping are substitutes, not complements.** Batching is worth roughly 24x on the unmapped
-path, because it amortizes exactly the syscall that mapping removes outright. Once the segment is mapped the
-benefit collapses — and at 4 KB it disappears entirely, the batch costing 3.06 µs per entry against 3.00 µs
+**Batching and mapping are substitutes, not complements.** Batching is worth roughly 23x on the unmapped
+path at 64 bytes, because it amortizes exactly the syscall that mapping removes outright. Once the segment is
+mapped the benefit collapses — and at 4 KB it inverts, the batch costing 4.25 µs per entry against 4.17 µs
 for a single append. Which is to say: if you turn on `MemoryMapped` for a hot queue, do not also expect the
 batching path to keep paying for itself there.
 
-**Allocation per append does not grow with payload size** — 613 B at 64 bytes, 670 B at 4 KB — which is the
-zero-copy write path showing up in the numbers: what is allocated is async machinery, never the payload.
-`InMemoryRaftWal` allocates 4192 B for a 4 KB payload because it copies deliberately, having no buffer of
-its own.
+**Allocation per append is async machinery, not payload.** At 64 bytes and at 4 KB the mapped path allocates
+132 B and 112 B — it does not track payload size, which is the zero-copy write path showing up in the
+numbers. The unmapped 4 KB figure of 680 B is the one place a payload-sized buffer is briefly involved.
+`InMemoryRaftWal`, by contrast, copies deliberately, having no buffer of its own.
 
 **Automatic compaction is opt-in, triggered by applied growth, never by a timer.** Setting
 `RaftGroupOptions.AutoCompactionThreshold` makes a group call its own `TakeSnapshotAsync` once entries
@@ -251,3 +301,33 @@ immediately regardless of how replication goes, so shutdown is never held hostag
 Verified with 80 repeated runs of the previously-hanging `RaftGroupTests` test and 40 of the full
 `LeadershipTransferTests` class (both via `Start-Process`/`WaitForExit`, not a shell timeout) — 0 hangs in
 either, against a same-method baseline of roughly 1 in 12–25 before the fix.
+
+### The same shape again, in the election path
+
+Replication was queued; the election was not. `TickAsync` awaited `CampaignAsync` inline, which puts the
+whole campaign on the tick loop's stack — including `BecomeLeaderAsync`, which appends the term's no-op and,
+at `Quorum` durability, waits for it to commit. A winner that could not reach a majority therefore stopped
+the clock for *every* group on that node, and the loop never got back to observing shutdown.
+
+This one was not diagnosed by inspection either. A run sat idle, and a dump named it outright:
+
+```
+TickLoopAsync -> TickOneAsync -> TickAsync -> CampaignAsync
+              -> BecomeLeaderAsync -> AppendCoreAsync -> WaitForCommitAsync
+```
+
+with every pool thread idle and no other library frame anywhere in the process — not starvation, not a lock,
+just an `await` on a commit that a partitioned node was never going to get. Elections are now queued with the
+same one-in-flight debounce replication and compaction already use, and the election deadline is re-armed
+before queuing so a tick arriving mid-campaign does not stack a second one behind it. The general rule this
+is the third instance of: **work whose duration is set by the rest of the cluster does not belong on the
+clock's stack.**
+
+Two related bugs surfaced while chasing it, both on the catch-up path and both able to strand a replica
+permanently rather than briefly. `ReplicateToPeerAsync` decided a peer needed a snapshot from `prevTerm < 0`
+alone — but `TermAtAsync(0)` answers 0, "before the log began", which is exactly what a peer still at
+`NextIndex` 1 asks about, so against a compacted log such a peer was sent an empty range and acknowledged at
+match 0 forever. That is not a corner case: it is what every node joining a group old enough to have
+compacted looks like. And after a snapshot *was* sent, the loop exited instead of iterating — `continue` in a
+do-while jumps to the condition, and the pending flag had been cleared at the top of the body — so the
+entries appended since the compaction boundary waited for the next heartbeat.
