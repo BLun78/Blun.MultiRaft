@@ -160,6 +160,16 @@ Inside `src/Blun.MultiRaft`:
   coordinator answers two questions (is this node a legal target? who is carrying least?) and performs a
   handover when asked. `ClusterEventKind.NodeBecameAvailable` fires on the **cluster leader only** so one
   reactor decides, not N.
+- **"A legal target" is two separate checks, and both defaults are derived rather than picked.**
+  `LeaderTargetLagThreshold` (null → `MaxEntriesPerAppend`, one replication round) and
+  `LeaderTargetContactWindow` (null → 2× `ElectionTimeout`, the coordinator's own availability window).
+  Deliberately *not* `PromotionCatchUpThreshold`: promotion getting it wrong costs a weaker quorum, a
+  handover getting it wrong stops writes for up to `LeadershipTransferCatchUpTimeout`. Liveness is checked
+  separately because a node that just died still has a current-looking match index.
+- **`NotResponding` must not be collapsed into `Unreachable`.** `Unreachable` means the group's *leader*
+  could not be asked, so `ClusterCoordinator.ResolveAsync` stops walking candidates. `NotResponding` is a
+  verdict about one candidate and the walk continues. Merging them turns one dead replica into a refusal to
+  place the group anywhere.
 - **Load reports are pushed, never logged.** Leader counts change on every election of every group; putting
   them through the cluster group's log would be a write firehose on the one group that must stay responsive.
   Soft state, held in memory on the cluster leader, aged out by TTL.

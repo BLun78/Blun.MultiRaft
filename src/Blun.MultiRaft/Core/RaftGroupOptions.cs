@@ -81,6 +81,46 @@ public sealed class RaftGroupOptions
     public long PromotionCatchUpThreshold { get; init; } = 64;
 
     /// <summary>
+    /// How many entries behind the leader a voter may be and still be reported as a legal leadership target by
+    /// <see cref="RaftGroupInstance.EvaluateLeaderTargetAsync"/>. <see langword="null"/> (the default) uses
+    /// <see cref="MaxEntriesPerAppend"/> — at most one replication round behind.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="PromotionCatchUpThreshold"/> because the two questions have different costs
+    /// when answered wrongly. Promotion asks whether a replica is close enough to be useful as a voter, and
+    /// getting it wrong yields a slightly weaker quorum for a while. This asks whether a node can take over
+    /// without the group standing still, and getting it wrong stops writes for up to
+    /// <see cref="LeadershipTransferCatchUpTimeout"/> before the handover is abandoned. One number steering
+    /// both would mean tuning promotions silently retunes handovers.
+    /// <para>
+    /// The default is derived rather than picked: one replication round is the unit the protocol already works
+    /// in, so "at most one round behind" scales with <see cref="MaxEntriesPerAppend"/> instead of being a
+    /// constant that goes stale the moment someone changes the batch size. Exact equality is not usable — this
+    /// is a snapshot with writes still flowing, so <c>MatchIndex == LastIndex</c> is momentary and on a busy
+    /// queue almost never true, which would report every target as lagging. The transfer itself does demand
+    /// exact equality, but it can afford to: it stops accepting writes first.
+    /// </para>
+    /// </remarks>
+    public long? LeaderTargetLagThreshold { get; init; }
+
+    /// <summary>
+    /// How recently a voter must have replied to count as healthy enough to be handed leadership.
+    /// <see langword="null"/> (the default) uses twice <see cref="ElectionTimeout"/>.
+    /// </summary>
+    /// <remarks>
+    /// Lag alone does not answer this. A node that died moments ago still has a <c>MatchIndex</c> close to the
+    /// leader's — on a quiet queue, indistinguishable from a healthy one — so without a liveness check it would
+    /// be reported as a legal target, and the handover would then stop writes and wait out
+    /// <see cref="LeadershipTransferCatchUpTimeout"/> against a node that is never going to answer. The group
+    /// keeps its leader either way; what this saves is the stall.
+    /// <para>
+    /// Twice the election timeout by default, which is the same window the cluster coordinator uses to decide
+    /// a node is available — the same question deserves the same answer in both places.
+    /// </para>
+    /// </remarks>
+    public TimeSpan? LeaderTargetContactWindow { get; init; }
+
+    /// <summary>
     /// How long <see cref="RaftGroupInstance.TransferLeadershipAsync"/> waits for the target's log to reach
     /// the leader's before giving up and sending nothing. <see langword="null"/> (the default) uses ten times
     /// <see cref="ElectionTimeout"/>.

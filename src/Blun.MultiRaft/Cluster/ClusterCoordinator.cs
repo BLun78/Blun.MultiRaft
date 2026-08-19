@@ -475,6 +475,10 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
                 return last;
             }
 
+            // Only these two end the walk, and only because they say nothing about the candidate: the group's
+            // leader could not be asked at all, so the next candidate would put the same question to the same
+            // silent leader. Every other refusal -- Lagging, NotResponding, NotAVoter -- is an answer about
+            // this one node, and the point of the walk is to try the next one.
             if (last.Status is LeaderTargetStatus.NoLeader or LeaderTargetStatus.Unreachable)
             {
                 return last;

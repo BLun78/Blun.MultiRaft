@@ -125,6 +125,8 @@ public sealed class ClusterOptions
                 MaxEntriesPerAppend = source.MaxEntriesPerAppend,
                 PreVote = source.PreVote,
                 PromotionCatchUpThreshold = source.PromotionCatchUpThreshold,
+                LeaderTargetLagThreshold = source.LeaderTargetLagThreshold,
+                LeaderTargetContactWindow = source.LeaderTargetContactWindow,
                 LeadershipTransferCatchUpTimeout = source.LeadershipTransferCatchUpTimeout,
                 AutoCompactionThreshold = source.AutoCompactionThreshold,
 

@@ -141,9 +141,39 @@ LeaderTargetResponse moved = await cluster.RequestLeaderTransferAsync(group, pre
 ```
 
 `Status` says why a node was refused — `NotAMember`, `NotAVoter`, `Lagging` (with `Lag` in entries),
-`TransferInFlight`, `NoLeader`, `Unreachable` — or `Valid`, or `IsCurrentLeader`, which is not an error but
-"there is nothing to do". `Transferred` says whether leadership actually moved, and is `false` for the two
-query forms.
+`NotResponding`, `TransferInFlight`, `NoLeader`, `Unreachable` — or `Valid`, or `IsCurrentLeader`, which is
+not an error but "there is nothing to do". `Transferred` says whether leadership actually moved, and is
+`false` for the two query forms.
+
+### What "a legal target" means
+
+Two conditions, checked separately because they can fail separately.
+
+**Caught up**, within `RaftGroupOptions.LeaderTargetLagThreshold`. Null by default, meaning
+`MaxEntriesPerAppend` — at most one replication round behind. Exact equality is not usable for a query:
+writes are still flowing, so `MatchIndex == LastIndex` is momentary and on a busy queue almost never true,
+and demanding it would report every target as lagging. The *transfer* does demand exact equality, but it can
+afford to — it stops accepting writes first.
+
+This is deliberately not `PromotionCatchUpThreshold`. That one asks whether a replica is close enough to be
+useful as a voter, and a wrong answer costs a slightly weaker quorum for a while. This one asks whether a
+node can take over without the group standing still, and a wrong answer stops writes for up to
+`LeadershipTransferCatchUpTimeout`. One number steering both would mean tuning promotions silently retunes
+handovers.
+
+**Still answering**, within `RaftGroupOptions.LeaderTargetContactWindow`. Null by default, meaning twice
+`ElectionTimeout` — the same window the coordinator uses to decide a node is available. Lag alone cannot
+answer this: a node that died moments ago still has a match index next to the leader's, and on a quiet queue
+that is indistinguishable from a healthy replica. Without the check it would be reported `Valid`, and the
+handover would then stop writes and wait out `LeadershipTransferCatchUpTimeout` against a node that is never
+going to reply.
+
+`NotResponding` is distinct from `Unreachable`, and the distinction matters to the caller. `Unreachable`
+means the group's *leader* could not be asked, so nothing is known about any candidate and
+`ResolveLeaderTargetAsync` stops walking alternatives — asking again would put the same question to the same
+silent leader. `NotResponding` means the leader answered and rejected *this* candidate, so the walk continues
+to the next one. When the leader picks for itself, it prefers a node that is still answering over one with a
+higher match index that has gone quiet.
 
 **The group is never left without a leader.** A target that turns out to be unsuitable, declines, or cannot
 be reached simply does not receive leadership, and the node holding it keeps it. There is no step that gives

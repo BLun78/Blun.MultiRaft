@@ -69,12 +69,13 @@ internal sealed class TestCluster : IAsyncDisposable
     public async ValueTask<RaftMembership> AddGroupEverywhereAsync(
         RaftGroupId group,
         IEnumerable<ulong> voters,
-        Func<NodeId, IRaftStateMachine>? stateMachine = null)
+        Func<NodeId, IRaftStateMachine>? stateMachine = null,
+        RaftGroupOptions? options = null)
     {
         RaftMembership membership = RaftMembership.OfVoters([.. voters.Select(v => new NodeId(v))]);
         foreach ((NodeId node, MultiRaftHost host) in _hosts)
         {
-            await host.AddGroupAsync(group, membership, stateMachine?.Invoke(node), FastOptions);
+            await host.AddGroupAsync(group, membership, stateMachine?.Invoke(node), options ?? FastOptions);
         }
 
         return membership;

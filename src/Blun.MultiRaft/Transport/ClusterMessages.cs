@@ -60,6 +60,21 @@ public enum LeaderTargetStatus : byte
 
     /// <summary>A transfer for this group is already in flight.</summary>
     TransferInFlight = 7,
+
+    /// <summary>
+    /// In the group, voting, caught up on paper — but it has not answered the leader within
+    /// <see cref="RaftGroupOptions.LeaderTargetContactWindow"/>, so its match index is a memory rather than a
+    /// fact.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Unreachable"/>, and the distinction is load-bearing rather than cosmetic.
+    /// <see cref="Unreachable"/> means the group's <em>leader</em> could not be asked, so nothing is known
+    /// about any candidate and walking the alternatives would only ask the same silent leader again — the
+    /// coordinator stops there. This means the leader answered and rejected <em>this one</em> candidate, so
+    /// the next candidate is worth asking about. Collapsing the two would turn one dead replica into a refusal
+    /// to place the group anywhere.
+    /// </remarks>
+    NotResponding = 8,
 }
 
 /// <summary>

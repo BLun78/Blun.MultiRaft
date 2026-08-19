@@ -483,13 +483,19 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         long match = _peers.TryGetValue(candidate, out PeerReplicationState? peer) ? peer.MatchIndex : 0;
         long lag = Math.Max(0, _wal.LastIndex - match);
 
-        // Interim: the promotion threshold stands in for a leadership-target threshold. Exact equality is not
-        // usable here -- this is a snapshot with writes still flowing, so MatchIndex == LastIndex is momentary
-        // and on a busy queue very nearly never true, which would report every target as lagging. The
-        // transfer itself does demand exact equality, but it can, because it stops accepting writes first.
-        if (lag > _options.PromotionCatchUpThreshold)
+        if (lag > LeaderTargetLagThreshold)
         {
             return new LeaderTargetResponse(candidate, LeaderTargetStatus.Lagging, lag, Transferred: false);
+        }
+
+        // "Fully in sync and healthy" is two claims, and the match index only supports the first. A node that
+        // died a moment ago still has a match index close to this one's -- on a quiet queue, indistinguishable
+        // from a live replica -- so lag alone would report it as a legal target. The handover would then stop
+        // accepting writes and wait out LeadershipTransferCatchUpTimeout against a node that will never
+        // answer. The group keeps its leader regardless; the stall is what this avoids.
+        if (!HasRecentContact(candidate, LeaderTargetContactWindow))
+        {
+            return new LeaderTargetResponse(candidate, LeaderTargetStatus.NotResponding, lag, Transferred: false);
         }
 
         if (Volatile.Read(ref _transferInProgress) != 0)
@@ -506,11 +512,30 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         return new LeaderTargetResponse(candidate, LeaderTargetStatus.Valid, lag, transferred);
     }
 
+    /// <summary>Effective lag tolerance for a leadership target: one replication round unless configured.</summary>
+    private long LeaderTargetLagThreshold => _options.LeaderTargetLagThreshold ?? _options.MaxEntriesPerAppend;
+
+    /// <summary>Effective liveness window for a leadership target: twice the election timeout unless configured.</summary>
+    private TimeSpan LeaderTargetContactWindow
+        => _options.LeaderTargetContactWindow ?? TimeSpan.FromTicks(_options.ElectionTimeout.Ticks * 2);
+
     /// <summary>The non-throwing half of <see cref="PickTransferee"/>, for the query path.</summary>
+    /// <remarks>
+    /// A responding peer wins over a silent one even when the silent one's match index is higher. That index
+    /// is only a record of the last thing the node admitted to; once it has stopped answering it stops being
+    /// evidence, and picking on it would nominate the deadest node in the group whenever it happened to die
+    /// furthest ahead. When nothing is responding the best match index is still returned rather than nothing,
+    /// so the caller is told <see cref="LeaderTargetStatus.NotResponding"/> about a real node instead of
+    /// "no member" about the group.
+    /// </remarks>
     private bool TryPickTransferee(RaftMembership membership, out NodeId chosen)
     {
+        TimeSpan window = LeaderTargetContactWindow;
         NodeId? best = null;
+        NodeId? bestLive = null;
         long bestMatch = -1;
+        long bestLiveMatch = -1;
+
         foreach (NodeId voter in membership.Voters)
         {
             if (voter == Self)
@@ -524,10 +549,18 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 bestMatch = match;
                 best = voter;
             }
+
+            if (match > bestLiveMatch && HasRecentContact(voter, window))
+            {
+                bestLiveMatch = match;
+                bestLive = voter;
+            }
         }
 
-        chosen = best ?? default;
-        return best is not null;
+        // Node id 0 is legal, so presence decides this, never the value.
+        NodeId? picked = bestLive ?? best;
+        chosen = picked ?? default;
+        return picked is not null;
     }
 
     /// <summary>
