@@ -169,3 +169,11 @@ Inside `src/Blun.MultiRaft`:
 - **`SingleNodeRaftTransport` throws `InvalidOperationException`, not `IOException`.** In single-node mode
   nothing should ever address a peer; `IOException` would be retried forever by the replication loop instead
   of reporting the problem.
+
+## Known open defect
+
+`doc/open-issue-seed-visibility.md` — over the gRPC transport, nodes joining a cold cluster do not see the
+seed in the cluster group's voter set. Reproducible in the Aspire demo, **not** reproduced in-process on
+either WAL implementation, so the transport is the prime suspect. Read that file before touching
+`AbsorbEntriesAsync`, `RaftFrameCodec`, or `RaftStreamSession.HandleRequestAsync` — the last of these
+swallows `InvalidOperationException`, which is what makes a follower-side append failure invisible.
