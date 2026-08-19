@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+    <RootNamespace>Blun.MultiRaft.Node</RootNamespace>
+    <UserSecretsId>blun-multiraft-node</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Blun.MultiRaft.Grpc/Blun.MultiRaft.Grpc.csproj" />
+  </ItemGroup>
+
+</Project>

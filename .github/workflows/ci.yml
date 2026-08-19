@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Windows, Linux and macOS are first-class targets per the spec. Running all three is what turns that
+    # from a claim into a fact -- the storage layer is the part most likely to diverge, and it is exactly
+    # the part a single-platform run would never catch.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+          dotnet-quality: preview
+
+      - name: Restore
+        run: dotnet restore Blun.MultiRaft.slnx
+
+      - name: Build
+        run: dotnet build Blun.MultiRaft.slnx --no-restore -c Release
+
+      - name: Test
+        # Not `dotnet test`: this project's Microsoft.Testing.Platform / xUnit v3 setup only runs through the
+        # new MTP runner, and `dotnet test`'s VSTest bridge is refused outright on the .NET 10+ SDK ("Testing
+        # with VSTest target is no longer supported"). Verified locally, not assumed -- `dotnet test` with
+        # this exact invocation fails immediately, before a single test runs. `dotnet exec` on the built DLL
+        # goes straight to the MTP entry point and takes MTP's own `-result-trx` flag instead.
+        run: dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/results.trx
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: '**/TestResults/*.trx'
+          if-no-files-found: ignore

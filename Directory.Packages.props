@@ -1,0 +1,36 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.11" />
+   </ItemGroup>
+   <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="11.0.0-preview.7.26381.103" />
+    <PackageVersion Include="System.IO.Hashing" Version="11.0.0-preview.7.26381.103" />
+   </ItemGroup>
+  <ItemGroup>
+    <PackageVersion Include="Grpc.AspNetCore" Version="2.83.0" />
+    <PackageVersion Include="Grpc.Net.Client" Version="2.83.0" />
+  </ItemGroup>
+  <ItemGroup Label="Transitive pins">
+    <!-- Aspire 13.4 pulls MessagePack 2.5.192, which carries several published advisories
+         (GHSA-hv8m-jj95-wg3x among them). Pinned forward rather than suppressed: the build treats
+         vulnerability warnings as errors on purpose, and silencing them would make the next one invisible. -->
+    <PackageVersion Include="MessagePack" Version="3.1.8" />
+  </ItemGroup>
+  <ItemGroup Label="Aspire">
+    <PackageVersion Include="Aspire.Hosting.AppHost" Version="13.4.6" />
+  </ItemGroup>
+  <ItemGroup Label="Test">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageVersion Include="xunit.v3" Version="4.0.0" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
+  </ItemGroup>
+  <ItemGroup Label="Benchmark">
+    <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.1" />
+  </ItemGroup>
+</Project>

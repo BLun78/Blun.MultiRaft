@@ -1,0 +1,24 @@
+## .NET build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+
+## Test and benchmark output
+TestResults/
+BenchmarkDotNet.Artifacts/
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Local node data written by the demo
+demo/**/data/

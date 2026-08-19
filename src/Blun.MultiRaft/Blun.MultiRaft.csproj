@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Types and non-obvious members carry docs; requiring one on every operator== is noise, not rigour. -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+    <PackageId>Blun.MultiRaft</PackageId>
+    <Description>Multi-Raft consensus library with leader-driven asymmetric replication and a pluggable write-ahead log.</Description>
+  </PropertyGroup>
+
+  <!-- net11-only switches live here, never unconditionally. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net11.0'">
+    <Features>$(Features);runtime-async=on</Features>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Blun.MultiRaft.Wal/Blun.MultiRaft.Wal.csproj" />
+  </ItemGroup>
+
+</Project>
