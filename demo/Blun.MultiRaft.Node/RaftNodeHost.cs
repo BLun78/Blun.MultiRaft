@@ -65,7 +65,14 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
     /// <inheritdoc />
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _transport = new GrpcRaftTransport(new GrpcRaftTransportOptions { Peers = _peers, Protocol = _protocol }, this);
+        _transport = new GrpcRaftTransport(
+            new GrpcRaftTransportOptions
+            {
+                Peers = _peers,
+                Protocol = _protocol,
+                Logger = _loggerFactory.CreateLogger<GrpcRaftTransport>(),
+            },
+            this);
 
         IRaftWalFactory wal = string.IsNullOrWhiteSpace(_dataDirectory)
             ? new InMemoryRaftWalFactory()

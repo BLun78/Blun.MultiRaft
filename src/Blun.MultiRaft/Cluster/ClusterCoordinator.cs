@@ -351,7 +351,9 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             }
         }
 
-        nodes.Sort(CompareForPlacement);
+        // Self is the cluster leader here — this method returns early otherwise — so the rule's "cluster
+        // leader last" clause applies to this node.
+        nodes.Sort((left, right) => ComparePlacement(left.Node, left.LeaderCount, right.Node, right.LeaderCount, Self));
         return new ClusterLoadSnapshot(nodes, Self);
     }
 
@@ -514,21 +516,14 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         long now = _time.GetTimestamp();
         NodeId? clusterLeader = ClusterLeader;
 
-        candidates.Sort((left, right) =>
-        {
-            int byLeaderRole = Rank(left).CompareTo(Rank(right));
-            if (byLeaderRole != 0)
-            {
-                return byLeaderRole;
-            }
-
-            int byLoad = LeaderCountOf(left).CompareTo(LeaderCountOf(right));
-            return byLoad != 0 ? byLoad : left.CompareTo(right);
-        });
+        candidates.Sort((left, right) => ComparePlacement(
+            left,
+            LeaderCountOf(left),
+            right,
+            LeaderCountOf(right),
+            clusterLeader));
 
         return candidates;
-
-        int Rank(NodeId node) => node == clusterLeader ? 1 : 0;
 
         int LeaderCountOf(NodeId node)
             => _load.TryGetValue(node, out LoadEntry entry)
@@ -805,10 +800,33 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
 
     private long ToTicks(TimeSpan span) => (long)(span.TotalSeconds * _time.TimestampFrequency);
 
-    private static int CompareForPlacement(NodeLoad left, NodeLoad right)
+    /// <summary>
+    /// The placement rule, and the only place it is written down: fewest leaderships first, the cluster
+    /// leader last, node id breaking ties.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <see cref="OrderCandidates"/>, which picks a transfer target, and by <see cref="GetLoad"/>,
+    /// which shows an operator the same ranking. They had a rule each, and only the placement one sorted the
+    /// cluster leader last — so the snapshot could name a node as least-loaded that placement would never have
+    /// chosen, which is exactly the kind of quiet disagreement a single rule everywhere was meant to prevent.
+    /// </remarks>
+    private static int ComparePlacement(
+        NodeId left,
+        int leftLeaderCount,
+        NodeId right,
+        int rightLeaderCount,
+        NodeId? clusterLeader)
     {
-        int byLoad = left.LeaderCount.CompareTo(right.LeaderCount);
-        return byLoad != 0 ? byLoad : left.Node.CompareTo(right.Node);
+        int byLeaderRole = Rank(left).CompareTo(Rank(right));
+        if (byLeaderRole != 0)
+        {
+            return byLeaderRole;
+        }
+
+        int byLoad = leftLeaderCount.CompareTo(rightLeaderCount);
+        return byLoad != 0 ? byLoad : left.CompareTo(right);
+
+        int Rank(NodeId node) => node == clusterLeader ? 1 : 0;
     }
 
     private readonly record struct LoadEntry(

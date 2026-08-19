@@ -12,6 +12,7 @@ using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
 using Grpc.Core;
 using Grpc.Net.Client;
+using Microsoft.Extensions.Logging;
 
 namespace Blun.MultiRaft.Grpc;
 
@@ -26,6 +27,12 @@ public sealed class GrpcRaftTransportOptions
 
     /// <summary>Which HTTP version to speak to every peer. See <see cref="RaftGrpcProtocol"/>.</summary>
     public RaftGrpcProtocol Protocol { get; init; } = RaftGrpcProtocol.Http2;
+
+    /// <summary>
+    /// Optional. Used only to report an inbound request this node could not answer — a session is otherwise
+    /// silent, and that silence is what made a follower-side append failure invisible from both ends.
+    /// </summary>
+    public ILogger? Logger { get; init; }
 }
 
 /// <summary>
@@ -237,7 +244,7 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
         }
 
         PeerConnection connection = await PeerConnection
-            .OpenAsync(address, _options.Protocol, _listener, cancellationToken)
+            .OpenAsync(address, _options.Protocol, _listener, _options.Logger, cancellationToken)
             .ConfigureAwait(false);
 
         // A concurrent caller may have won the race; keep whichever landed first and discard the loser
@@ -286,6 +293,7 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
             Uri address,
             RaftGrpcProtocol protocol,
             IRaftProtocolListener listener,
+            ILogger? logger,
             CancellationToken cancellationToken)
         {
             // EnableMultipleHttp2Connections is the client-side half of "the 101st stream still works": if
@@ -322,7 +330,8 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
                 call.RequestStream,
                 call.ResponseStream,
                 listener,
-                CancellationToken.None);
+                CancellationToken.None,
+                logger);
 
             return ValueTask.FromResult(new PeerConnection(channel, call, session));
         }

@@ -15,6 +15,15 @@ namespace Blun.MultiRaft.Grpc;
 /// <remarks>
 /// Deliberately the only place that knows both. The consensus core never sees a generated type, which is
 /// what keeps a second transport — or a replacement for this one — from being a rewrite.
+/// <para>
+/// Every byte payload crossing into a generated message is <em>copied</em>, never wrapped. A frame built here
+/// is queued to <see cref="RaftStreamSession"/>'s outbound channel and serialised later, on a different task,
+/// so the frame outlives the call that produced it — while its sources are explicitly recycled buffers:
+/// <see cref="IRaftWal.ReadFromAsync"/> hands out slices of a pooled buffer it reuses on every
+/// <c>MoveNextAsync</c>, and <see cref="IRaftSnapshotStore.ReadAsync"/> refills one chunk array. This codec
+/// cannot see how long a frame will live, so it cannot judge when wrapping would be safe, and the one case
+/// where it guessed wrong is the defect this rule exists to prevent — see the note on <see cref="ToProto(in RaftLogEntry)"/>.
+/// </para>
 /// </remarks>
 internal static class RaftFrameCodec
 {
@@ -37,6 +46,23 @@ internal static class RaftFrameCodec
             message.PrevLogTerm,
             message.LeaderCommit);
 
+    /// <remarks>
+    /// The payload copy is the one unavoidable cost on this path, and it is load-bearing rather than
+    /// defensive. <see cref="IRaftWal.ReadFromAsync"/> documents that the payload it yields is a slice of a
+    /// buffer the log owns and recycles on the next iteration, and the replication loop hands that enumerable
+    /// straight to the transport. <see cref="RaftStreamSession.AppendEntriesAsync"/> drains the whole round
+    /// into one frame before sending, so wrapping the memory instead of copying it left every entry in the
+    /// batch pointing at the same recycled slot: by serialisation time they all carried the <em>last</em>
+    /// entry's bytes. Headers were copied by value and so stayed correct, which is what made it silent —
+    /// indices and terms lined up, the follower's consistency check passed, entries were appended, and only
+    /// the contents were wrong. In the cluster group that surfaced as a follower applying one membership
+    /// change several times over and never seeing the others, so two nodes disagreed about who votes.
+    /// <para>
+    /// It was invisible in process because <c>InMemoryRaftTransport</c> detaches entries with
+    /// <see cref="RaftLogEntry.ToOwned"/> — the in-memory transport honoured the contract that this one broke,
+    /// so no test on either WAL implementation could see it.
+    /// </para>
+    /// </remarks>
     public static LogEntry ToProto(in RaftLogEntry entry)
         => new()
         {
@@ -45,10 +71,7 @@ internal static class RaftFrameCodec
             TimestampTicks = entry.Header.TimestampTicks,
             Kind = (uint)entry.Header.Kind,
             ApplicationTag = entry.Header.ApplicationTag,
-
-            // The one unavoidable copy on this path: protobuf-net owns its byte strings and we do not get to
-            // hand it a slice of someone else's buffer.
-            Payload = UnsafeByteOperations.UnsafeWrap(entry.Payload),
+            Payload = ByteString.CopyFrom(entry.Payload.Span),
         };
 
     public static RaftLogEntry ToDomain(LogEntry entry)
@@ -108,7 +131,7 @@ internal static class RaftFrameCodec
             Leader = request.Leader.Value,
             LastIncludedIndex = request.LastIncludedIndex,
             LastIncludedTerm = request.LastIncludedTerm,
-            Configuration = UnsafeByteOperations.UnsafeWrap(request.Configuration),
+            Configuration = ByteString.CopyFrom(request.Configuration.Span),
         };
 
     public static InstallSnapshotRequest ToDomain(RaftGroupId group, InstallSnapshot message)

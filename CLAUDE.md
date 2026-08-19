@@ -73,12 +73,18 @@ CI (`.github/workflows/ci.yml`) runs the full matrix on push/PR to `main`.
   MyLog.SomeEvent(_logger, param1, param2);
   ```
 
-  EventId ranges: 1000–1015 Core Raft (`RaftGroupInstance.Log`), 1100+ Host (`HostLog`), 1200+ Cluster
-  coordinator (`ClusterLog`), 2000+ Demo node (`NodeStartedLog`).
+  EventId ranges: 1000–1016 Core Raft (`RaftGroupInstance.Log`), 1100+ Host (`HostLog`), 1200+ Cluster
+  coordinator (`ClusterLog`), 1300+ gRPC transport (`GrpcLog`), 2000+ Demo node (`NodeStartedLog`).
 - Code must be trim-safe and AOT-compatible.
 - Throw `InvalidOperationException` for integrity violations; `IOException` for transport failures. This
   distinction is load-bearing: the replication loop treats `IOException` as an ordinary retryable condition,
   so throwing it for a real integrity problem makes a group spin silently forever.
+- **Buffers handed out by `IRaftWal.ReadFromAsync` and `IRaftSnapshotStore.ReadAsync` are recycled on the
+  next iteration.** Anything that keeps a payload past its `MoveNextAsync` — a transport batching a
+  replication round into one message, anything queuing a write — must copy first (`RaftLogEntry.ToOwned()`,
+  `ByteString.CopyFrom`). Ignoring this does not fail loudly: headers are copied by value, so indices and
+  terms stay right, the follower's consistency check passes, and only the *contents* are wrong. It cost days
+  once; see `doc/open-issue-seed-visibility.md`.
 
 ## Architecture
 
@@ -170,10 +176,12 @@ Inside `src/Blun.MultiRaft`:
   nothing should ever address a peer; `IOException` would be retried forever by the replication loop instead
   of reporting the problem.
 
-## Known open defect
+## No known open defects
 
-`doc/open-issue-seed-visibility.md` — over the gRPC transport, nodes joining a cold cluster do not see the
-seed in the cluster group's voter set. Reproducible in the Aspire demo, **not** reproduced in-process on
-either WAL implementation, so the transport is the prime suspect. Read that file before touching
-`AbsorbEntriesAsync`, `RaftFrameCodec`, or `RaftStreamSession.HandleRequestAsync` — the last of these
-swallows `InvalidOperationException`, which is what makes a follower-side append failure invisible.
+`doc/open-issue-seed-visibility.md` is kept as a post-mortem, not as an open item. The cluster group's voter
+set diverging over gRPC turned out to be `RaftFrameCodec` wrapping a recycled WAL buffer instead of copying
+it — see the buffer-lifetime rule under "Code conventions", which is the general form of it.
+
+Note that the Aspire demo persists to `demo/Blun.MultiRaft.AppHost/data/`. Log entries written before that
+fix carry the wrong payload permanently, so a demo run against a pre-existing data directory still shows the
+old divergence. Delete it to test a cold cluster.

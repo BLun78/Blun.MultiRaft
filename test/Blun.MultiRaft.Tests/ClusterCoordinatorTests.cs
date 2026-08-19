@@ -142,13 +142,17 @@ public sealed class ClusterCoordinatorTests
         IReadOnlyList<NodeLoad> ordered = leader.GetLoad().Nodes;
         Assert.Equal(3, ordered.Count);
 
-        // Least-loaded first. The cluster leader is sorted last by GetLoad's own rule only when it ties, so
-        // the meaningful assertion here is the monotonic ordering by leader count.
-        for (int i = 1; i < ordered.Count; i++)
+        // One rule, so this is the same ordering a transfer target is picked by, asserted whole: the cluster
+        // leader last regardless of what it is carrying, everyone else least-loaded first. Asserting only the
+        // monotonic half would pass against a snapshot that ranks the cluster leader first — which is what it
+        // used to do, because the snapshot and the placement path each had their own comparison.
+        Assert.Equal(leader.Self, ordered[^1].Node);
+
+        for (int i = 1; i < ordered.Count - 1; i++)
         {
             Assert.True(
                 ordered[i - 1].LeaderCount <= ordered[i].LeaderCount,
-                "load snapshot must be ordered least-loaded first");
+                "load snapshot must be ordered least-loaded first ahead of the cluster leader");
         }
     }
 
@@ -238,9 +242,22 @@ public sealed class ClusterCoordinatorTests
 
         // Take a node away long enough for the leader to notice, then bring it back. Both directions, so the
         // absence is unambiguous rather than a one-way partition the node could still answer through.
+        //
+        // Comfortably longer than the harness's two-second LoadReportTtl, and that margin is the point. The
+        // event fires on a transition from "expired" to "reporting again", so the leader has to actually
+        // observe the node as gone first; a partition held for exactly the TTL leaves it to chance whether an
+        // aging pass lands inside that window, and when it does not, nothing has changed and there is nothing
+        // to announce. The test then fails for a missing precondition rather than for the behaviour it means
+        // to assert -- which is what it did, intermittently, under a loaded run.
         cluster.Network.Cut(leader.Self, other.Self);
         cluster.Network.Cut(other.Self, leader.Self);
-        await Task.Delay(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromSeconds(5));
+
+        await ClusterTestCluster.WaitUntilAsync(
+            () => leader.Coordinator.GetLoad().Nodes.All(n => n.Node != other.Self),
+            "the cluster leader to age the partitioned node out of its load model",
+            TimeSpan.FromSeconds(15));
+
         cluster.Network.HealAll();
 
         await ClusterTestCluster.WaitUntilAsync(

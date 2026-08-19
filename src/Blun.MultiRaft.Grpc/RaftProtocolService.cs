@@ -10,6 +10,7 @@ using Grpc.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Blun.MultiRaft.Grpc;
 
@@ -24,9 +25,13 @@ namespace Blun.MultiRaft.Grpc;
 public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
 {
     private readonly IRaftProtocolListener _listener;
+    private readonly ILogger<RaftProtocolService>? _logger;
 
-    public RaftProtocolService(IRaftProtocolListener listener)
-        => _listener = listener ?? throw new ArgumentNullException(nameof(listener));
+    public RaftProtocolService(IRaftProtocolListener listener, ILogger<RaftProtocolService>? logger = null)
+    {
+        _listener = listener ?? throw new ArgumentNullException(nameof(listener));
+        _logger = logger;
+    }
 
     /// <inheritdoc />
     public override async Task Session(
@@ -38,7 +43,8 @@ public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
             responseStream,
             requestStream,
             _listener,
-            context.CancellationToken);
+            context.CancellationToken,
+            _logger);
 
         // The call has to stay open as long as the peer keeps the stream: returning would close it and force
         // a reconnect on every group sharing it.

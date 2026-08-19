@@ -10,6 +10,8 @@ using Blun.MultiRaft.Grpc.Protocol;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
 using Grpc.Core;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Blun.MultiRaft.Grpc;
 
@@ -31,6 +33,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
     private readonly IAsyncStreamWriter<RaftFrame> _writer;
     private readonly IAsyncStreamReader<RaftFrame> _reader;
     private readonly IRaftProtocolListener _listener;
+    private readonly ILogger _logger;
     private readonly Channel<RaftFrame> _outbound;
     private readonly CancellationTokenSource _shutdown;
 
@@ -43,11 +46,13 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         IAsyncStreamWriter<RaftFrame> writer,
         IAsyncStreamReader<RaftFrame> reader,
         IRaftProtocolListener listener,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         _writer = writer;
         _reader = reader;
         _listener = listener;
+        _logger = logger ?? NullLogger.Instance;
         _shutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _outbound = Channel.CreateUnbounded<RaftFrame>(new UnboundedChannelOptions
         {
@@ -180,9 +185,15 @@ internal sealed class RaftStreamSession : IAsyncDisposable
                     {
                         CorrelationId = correlation,
                         GroupId = request.Group.Value,
+
+                        // Copied, not wrapped, for the reason set out on RaftFrameCodec: SendAsync only queues
+                        // the frame, and FileRaftSnapshotStore.ReadAsync refills one chunk array per iteration,
+                        // so wrapping raced the producer. Every chunk but the last would have been serialised
+                        // from a buffer already overwritten by the next read — a snapshot larger than one chunk
+                        // would install silently corrupt state on the receiver.
                         SnapshotChunk = new SnapshotChunk
                         {
-                            Data = Google.Protobuf.UnsafeByteOperations.UnsafeWrap(chunk),
+                            Data = Google.Protobuf.ByteString.CopyFrom(chunk.Span),
                             Last = false,
                         },
                     },
@@ -461,8 +472,13 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         }
         catch (Exception ex) when (ex is RpcException or InvalidOperationException or IOException)
         {
-            // Deliberately swallowed: one group's failed request must not tear down the stream that every
-            // other group on this node pair is sharing.
+            // Still not rethrown: one group's failed request must not tear down the stream that every other
+            // group on this node pair is sharing. But it is no longer silent. An InvalidOperationException
+            // here is this library's signal for an integrity violation — SegmentedRaftWal.EnsureDense raises
+            // exactly that for a non-contiguous append — and a follower failing this way simply answers
+            // nothing, so the leader sees a timeout and retries forever. Swallowing that without a word made
+            // a whole class of follower-side failure invisible from both ends of the wire.
+            GrpcLog.RequestFailed(_logger, ex, frame.GroupId, frame.PayloadCase.ToString());
         }
     }
 

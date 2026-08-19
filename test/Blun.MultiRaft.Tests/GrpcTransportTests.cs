@@ -167,6 +167,121 @@ public sealed class GrpcTransportTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task EntriesReadFromTheLogArriveWithTheirOwnPayloads()
+    {
+        // The log hands out payloads that alias a buffer it recycles on every MoveNextAsync -- that is its
+        // documented contract, and the replication loop passes the enumerable straight to the transport. The
+        // gRPC session drains a whole round into one frame and serialises it later, on the writer pump, so a
+        // transport that wraps that memory instead of copying it ends up sending several entries that all
+        // point at the same slot. Headers are copied by value and stay right, so the follower's consistency
+        // check passes and the entries land -- with the wrong contents. Distinct payloads of distinct lengths
+        // are what makes that visible: a batch that all arrives as the last entry's bytes cannot pass.
+        string directory = Path.Combine(Path.GetTempPath(), "blun-grpc-alias-" + Guid.NewGuid().ToString("N"));
+        var group = new RaftGroupId(11);
+
+        try
+        {
+            await using (SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(directory))
+            {
+                RaftLogEntry[] written =
+                [
+                    .. Enumerable.Range(1, 8).Select(i => new RaftLogEntry(
+                        term: 1,
+                        index: i,
+                        RaftEntryKind.Command,
+                        System.Text.Encoding.UTF8.GetBytes(new string((char)('a' + i - 1), i * 3)))),
+                ];
+
+                await wal.AppendAsync(written);
+                await wal.FlushAsync();
+
+                var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
+                await using var transport = new GrpcRaftTransport(
+                    new GrpcRaftTransportOptions { Peers = peers, Protocol = RaftGrpcProtocol.Http2 },
+                    new InstantListener());
+
+                AppendEntriesResponse response = await transport.AppendEntriesAsync(
+                    new NodeId(1),
+                    new AppendEntriesRequest(group, 1, new NodeId(0), 0, 0, 0),
+                    wal.ReadFromAsync(1, 8),
+                    CancellationToken.None);
+
+                Assert.True(response.Success);
+
+                RaftLogEntry[] received = [.. Listener.ReceivedEntries.OrderBy(e => e.Index)];
+                Assert.Equal(8, received.Length);
+                for (int i = 0; i < written.Length; i++)
+                {
+                    Assert.Equal(written[i].Index, received[i].Index);
+                    Assert.Equal(written[i].Payload.ToArray(), received[i].Payload.ToArray());
+                }
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ASnapshotBodyLongerThanOneChunkArrivesIntact()
+    {
+        // Same hazard on the snapshot path, and worse if it slips through: the file-backed store refills one
+        // chunk array per iteration, and the session only *queues* each chunk frame, so wrapping that array
+        // means every chunk but the last is serialised from a buffer the producer has already overwritten. A
+        // snapshot is how a node that fell too far behind is rebuilt from scratch, so corruption here is
+        // adopted as state rather than rejected. The body deliberately spans several 64 KB chunks and is
+        // position-dependent, so a repeat of one chunk cannot go unnoticed.
+        string directory = Path.Combine(Path.GetTempPath(), "blun-grpc-snap-" + Guid.NewGuid().ToString("N"));
+        var group = new RaftGroupId(12);
+
+        try
+        {
+            var store = new FileRaftSnapshotStore(directory);
+            byte[] body = new byte[(64 * 1024 * 3) + 977];
+            for (int i = 0; i < body.Length; i++)
+            {
+                body[i] = (byte)(i * 31 % 251);
+            }
+
+            await store.WriteAsync(
+                group,
+                new RaftSnapshotMetadata(9, 2, new byte[] { 1, 2, 3 }),
+                OneBlock(body));
+
+            var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
+            await using var transport = new GrpcRaftTransport(
+                new GrpcRaftTransportOptions { Peers = peers, Protocol = RaftGrpcProtocol.Http2 },
+                new InstantListener());
+
+            InstallSnapshotResponse response = await transport.InstallSnapshotAsync(
+                new NodeId(1),
+                new InstallSnapshotRequest(group, 2, new NodeId(0), 9, 2, new byte[] { 1, 2, 3 }),
+                store.ReadAsync(group),
+                CancellationToken.None);
+
+            Assert.True(response.Success);
+            Assert.Equal(body, Listener.ReceivedSnapshotBody);
+
+            static async IAsyncEnumerable<ReadOnlyMemory<byte>> OneBlock(byte[] block)
+            {
+                await Task.CompletedTask;
+                yield return block;
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     private static int GetFreeTcpPort()
     {
         var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
@@ -186,6 +301,11 @@ public sealed class GrpcTransportTests : IAsyncLifetime
     {
         public System.Collections.Concurrent.ConcurrentBag<RaftEntryHeader> ReceivedHeaders { get; } = [];
 
+        /// <summary>Detached copies — the receiving side recycles its buffers just as the sending side does.</summary>
+        public System.Collections.Concurrent.ConcurrentBag<RaftLogEntry> ReceivedEntries { get; } = [];
+
+        public byte[] ReceivedSnapshotBody { get; private set; } = [];
+
         public async ValueTask<AppendEntriesResponse> OnAppendEntriesAsync(
             AppendEntriesRequest request,
             IAsyncEnumerable<RaftLogEntry> entries,
@@ -194,16 +314,26 @@ public sealed class GrpcTransportTests : IAsyncLifetime
             await foreach (RaftLogEntry entry in entries.WithCancellation(cancellationToken))
             {
                 ReceivedHeaders.Add(entry.Header);
+                ReceivedEntries.Add(entry.ToOwned());
             }
 
             return new AppendEntriesResponse(1, Success: true, MatchIndex: 0, ConflictIndex: 0);
         }
 
-        public ValueTask<InstallSnapshotResponse> OnInstallSnapshotAsync(
+        public async ValueTask<InstallSnapshotResponse> OnInstallSnapshotAsync(
             InstallSnapshotRequest request,
             IAsyncEnumerable<ReadOnlyMemory<byte>> body,
             CancellationToken cancellationToken = default)
-            => ValueTask.FromResult(new InstallSnapshotResponse(1, Success: true));
+        {
+            var assembled = new List<byte>();
+            await foreach (ReadOnlyMemory<byte> chunk in body.WithCancellation(cancellationToken))
+            {
+                assembled.AddRange(chunk.ToArray());
+            }
+
+            ReceivedSnapshotBody = [.. assembled];
+            return new InstallSnapshotResponse(1, Success: true);
+        }
 
         public ValueTask<ReadIndexResponse> OnReadIndexAsync(
             ReadIndexRequest request,
