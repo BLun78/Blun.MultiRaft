@@ -139,8 +139,19 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     /// by exactly that shape: work started on the tick loop's own stack kept the loop from ever observing
     /// shutdown. Reading at your own pace cannot do that, and a handler that throws cannot take the
     /// coordinator with it.
+    /// <para>
+    /// Meant for one consumer. Events are handed out, not broadcast, so two enumerators would each see part
+    /// of the sequence rather than both seeing all of it.
+    /// </para>
+    /// <para>
+    /// No cancellation token is woven in here. <see cref="DisposeAsync"/> completes the channel, which ends
+    /// the enumeration on its own — whereas a token read from the coordinator's own source would be resolved
+    /// when the consumer starts enumerating rather than when this property is read, and a consumer that
+    /// started a moment after disposal would get <see cref="ObjectDisposedException"/> instead of a clean end.
+    /// Pass your own token to <c>WithCancellation</c> if you want to stop reading early.
+    /// </para>
     /// </remarks>
-    public IAsyncEnumerable<ClusterEvent> Events => _events.Reader.ReadAllAsync(_shutdown.Token);
+    public IAsyncEnumerable<ClusterEvent> Events => _events.Reader.ReadAllAsync();
 
     /// <summary>
     /// Opens the cluster group and starts reporting. Validates the recorded mode first, and refuses to start
@@ -350,6 +361,10 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
 
         _disposed = true;
         _host.ClusterSink = null;
+
+        // Completed before the loop is cancelled, so a consumer mid-enumeration sees the sequence end rather
+        // than racing the source's disposal a few lines further down.
+        _events.Writer.TryComplete();
         await _shutdown.CancelAsync().ConfigureAwait(false);
 
         if (_loop is not null)
@@ -364,7 +379,6 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             }
         }
 
-        _events.Writer.TryComplete();
         _shutdown.Dispose();
     }
 

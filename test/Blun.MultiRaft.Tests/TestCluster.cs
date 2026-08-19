@@ -32,6 +32,13 @@ internal sealed class TestCluster : IAsyncDisposable
         ElectionJitter = 1.0,
         HeartbeatInterval = TimeSpan.FromMilliseconds(30),
         PromotionCatchUpThreshold = 8,
+
+        // Set explicitly rather than left to its default of ten election timeouts. Everything else here is
+        // compressed on purpose, but that default would compress this along with it -- to 1.2s -- and how
+        // long it takes to install a snapshot and replay the entries after it has nothing to do with how
+        // fast this suite wants elections to happen. Under a parallel run the two would occasionally cross,
+        // which is a property of the test configuration and not of the transfer.
+        LeadershipTransferCatchUpTimeout = TimeSpan.FromSeconds(10),
     };
 
     public InMemoryRaftCluster Network => _network;
