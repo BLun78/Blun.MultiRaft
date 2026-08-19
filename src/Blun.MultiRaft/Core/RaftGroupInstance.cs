@@ -545,8 +545,13 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 return true;
             }
 
-            // The ordinary replication loop is what actually advances MatchIndex; this only has to notice
-            // when it has, so polling here is cheap and needs no dedicated wakeup.
+            // Drive replication rather than only watching it. Waiting on the heartbeat quantizes catch-up to
+            // HeartbeatInterval per round, which is fine for ordinary replication and wrong here: writes are
+            // already blocked, so every round this waits for is dead time inside a window that is bounded.
+            // It matters most in exactly the case that needs the most rounds — a target so far behind it
+            // needs a snapshot first and the trailing entries after. The call is debounced per peer, so
+            // asking on every poll costs nothing when a round is already in flight.
+            PushToAllPeers();
             await Task.Delay(5, cancellationToken).ConfigureAwait(false);
         }
 
@@ -839,7 +844,16 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 // A pre-vote changes nothing on this node — no term bump, no persisted vote. It is refused
                 // while a leader is still being heard from, which is precisely what stops a rejoining node
                 // from disrupting a working group.
-                bool leaderAlive = _time.GetTimestamp() < Volatile.Read(ref _leaderContactDeadline);
+                //
+                // A leader counts itself as that leader. Nothing sets _leaderContactDeadline on the node that
+                // IS the leader — it is written when a leader is heard *from* — so without the first clause a
+                // healthy leader reads its own deadline as long expired and cheerfully grants a pre-vote
+                // against itself. The candidate then wins its pre-vote round on the leader's own grant, bumps
+                // the term for real, and the leader steps down for a challenger it had no reason to yield to.
+                // A deliberate handover is unaffected: it goes through TimeoutNow with skipPreVote, which is
+                // exactly why that flag exists.
+                bool leaderAlive = IsLeader
+                    || _time.GetTimestamp() < Volatile.Read(ref _leaderContactDeadline);
                 bool grant = logOk && request.Term > _currentTerm && !leaderAlive;
                 return new VoteResponse(_currentTerm, grant);
             }
@@ -1230,7 +1244,16 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 long term = CurrentTerm;
                 long prevIndex = peer.NextIndex - 1;
                 long prevTerm = await _wal.TermAtAsync(prevIndex, _shutdown.Token).ConfigureAwait(false);
-                if (prevTerm < 0)
+
+                // Two ways the log can no longer serve this peer, and the term check alone catches only one.
+                // A compacted prevIndex answers -1, which is the case that check was written for. But index 0
+                // answers 0 — "before the log began" — and that is exactly what a peer which has never been
+                // replicated to asks about. So a follower still at NextIndex 1, against a log whose prefix has
+                // been compacted away, passes the term check, is sent an empty range, is acknowledged at match
+                // 0, and repeats that forever without ever moving. Comparing against FirstIndex is what
+                // catches it, and it is not a corner case: it is what every node joining a group that has
+                // been running long enough to compact looks like.
+                if (prevTerm < 0 || peer.NextIndex < _wal.FirstIndex)
                 {
                     // The follower needs entries this leader has already compacted away, so there is nothing
                     // to send: replication has to restart from a snapshot instead of from the log.
@@ -1240,6 +1263,13 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                         return;
                     }
 
+                    // A snapshot only carries the peer up to the compaction boundary; everything appended
+                    // since is still owed to it. Marking the round pending is what makes `continue` actually
+                    // iterate — in a do-while it jumps to the condition, and the flag was cleared at the top
+                    // of this body, so without this the loop exits here and the trailing entries wait for the
+                    // next heartbeat. That delay is invisible in ordinary replication and decisive during a
+                    // leadership transfer, whose catch-up window is bounded.
+                    peer.Pending = 1;
                     continue;
                 }
 

@@ -313,27 +313,40 @@ public sealed class MessageSizeLimitTests : IDisposable
         // The regression this guards: sizing the per-log framing buffer to MaxPayloadBytes costs a megabyte
         // per group, which across thousands of queues is gigabytes of buffer for a case almost none of them
         // hit. Opening many logs at the defaults must stay cheap.
-        var logs = new List<SegmentedRaftWal>();
-        try
-        {
-            long before = GC.GetTotalAllocatedBytes(precise: true);
-            for (int i = 0; i < 32; i++)
-            {
-                logs.Add(await SegmentedRaftWal.OpenAsync(Path.Combine(_directory, "g" + i)));
-            }
+        //
+        // Sampled, and the minimum taken. GC.GetTotalAllocatedBytes counts the whole process, and xUnit runs
+        // collections in parallel, so a single reading also charges this log whatever every other test
+        // happened to allocate in the same window -- which made this fail on roughly three runs in five while
+        // passing every time the class was run alone. Interference can only ever add, never subtract, so the
+        // smallest of several samples converges on what an open actually costs. The bound itself is unchanged.
+        long best = long.MaxValue;
 
-            long perLog = (GC.GetTotalAllocatedBytes(precise: true) - before) / 32;
-            Assert.True(
-                perLog < 128 * 1024,
-                "each log allocated " + perLog + " bytes at open; the framing buffer must not track the message cap");
-        }
-        finally
+        for (int attempt = 0; attempt < 5; attempt++)
         {
-            foreach (SegmentedRaftWal log in logs)
+            var logs = new List<SegmentedRaftWal>();
+            try
             {
-                await log.DisposeAsync();
+                long before = GC.GetTotalAllocatedBytes(precise: true);
+                for (int i = 0; i < 32; i++)
+                {
+                    logs.Add(await SegmentedRaftWal.OpenAsync(
+                        Path.Combine(_directory, "a" + attempt, "g" + i)));
+                }
+
+                best = Math.Min(best, (GC.GetTotalAllocatedBytes(precise: true) - before) / 32);
+            }
+            finally
+            {
+                foreach (SegmentedRaftWal log in logs)
+                {
+                    await log.DisposeAsync();
+                }
             }
         }
+
+        Assert.True(
+            best < 128 * 1024,
+            "each log allocated " + best + " bytes at open; the framing buffer must not track the message cap");
     }
 
     public void Dispose()
