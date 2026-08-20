@@ -92,6 +92,73 @@ Inside the core, `Core/` holds the group instance and its state, `Transport/` th
 in-process cluster, `Hosting/` the per-node host and its shared clock, `Cluster/` the cluster-management
 group and the placement API built on it.
 
+## The demo cluster
+
+```bash
+dotnet run --project demo/Blun.MultiRaft.AppHost/Blun.MultiRaft.AppHost.csproj
+```
+
+Five nodes over real gRPC, three queue groups plus the administrative one, and an observer that watches all
+five and can stop and start them again. Five rather than three because the quorum is then three, which puts
+the interesting states within reach by hand: kill one node and the cluster shrugs, kill two and it still
+works, kill the third and writes stop.
+
+| What | Where |
+|---|---|
+| Nodes 1–5, Raft protocol | `127.0.0.1:7101`–`7105` |
+| Nodes 1–5, `/status`, `/cluster/load`, placement | `127.0.0.1:8101`–`8105` |
+| App-host control plane — resource state, start/stop, console logs | `127.0.0.1:8200` |
+| Observer API — the aggregated cluster view | `127.0.0.1:8300` |
+| Observer UI (Angular, Tailwind) | `127.0.0.1:4200` |
+
+The observer is an ordinary client of the nodes' `/status` endpoints, given no privileged access to the
+cluster: everything it displays could have been fetched with curl. What it cannot do on its own is start and
+stop processes, and that is the one thing it forwards to the app host, which is the only place where
+starting a resource and reading its console output are possible without hunting for OS process handles.
+
+Leadership is moved by **clicking a cell in the group matrix**: the cell is the pair of group and node the
+request is about, so it is what you click. The node already leading a group, and any node that is not
+answering, are not offered. The picker on the right of each row is the other half of the same idea — leaving
+the target empty asks the group's own leader to choose the best-placed candidate, and the answer it gives
+(`Valid`, `Lagging`, `NotResponding`) appears next to the button that asked.
+
+**The write-ahead log has its own panel**, because a log nobody can see is a log nobody trusts. Per group and
+per node it shows the bytes the filesystem actually holds — segments included, so the half-written segment
+counts — alongside the entry count, the index range, the number of segments and the average bytes per entry.
+The last column sends generated traffic into a group: 100, 1 000 or 10 000 commands, at most one every 10 ms,
+routed to that group's leader because that is where an append goes. Every follower's copy grows with it and
+ends up byte-identical, which is the clearest picture of replication the demo has.
+
+The rate shown next to a run is measured, not the rate that was asked for. Each append waits for its commit,
+so what the number reports is what a replicated round trip costs — around 36–42 writes a second here, not
+the hundred a ten-millisecond interval would suggest. The contrast between the queue groups at roughly
+285 bytes an entry (a 256-byte payload plus framing) and the cluster group at roughly 47 is worth a look too.
+
+Both kinds of "out" are reachable from the node cards, and they are not the same thing. **Stop** ends the
+process — the node is gone and its peers find out by not hearing from it. **Out of cluster** leaves it
+running and takes it out of the cluster group's configuration, which is a single-server membership change on
+the administrative plane. A removal does not stick while the node is still configured on the others: the
+coordinator's reconcile pass adopts any configured node it finds missing and promotes it back, one per pass.
+That is the mechanism working in plain sight, and it happens fast enough that the voter set is usually whole
+again before the next poll.
+
+Two things the UI deliberately keeps apart. **Aspire's resource state and whether a node answers** are
+different claims — a node can be `Running` and silent, and watching a consensus cluster is largely about
+being able to see that. And **the cluster leader is a tally, not a fact**: every node reports the leader it
+believes in, the header shows what most of them say, and while they disagree it says so rather than picking
+a winner. During an election they legitimately differ.
+
+The UI is skipped with a note if Node.js is not on `PATH`; the five nodes and the observer API come up
+regardless.
+
+The demo persists to `demo/Blun.MultiRaft.AppHost/data/`. **Delete it before the first five-node run** — an
+older directory holds a cluster whose voter set is three nodes.
+
+`demo/chaos/` drives all of this from a script — kills, restarts, membership changes, the quorum edge — and
+checks after every step that the cluster settled, then reports what the nodes logged while it happened. One
+warning is expected and frequent there: `replication to node N failed`, carrying an `IOException`, which is
+what the replication loop is supposed to say about a peer that is not answering.
+
 ## Design decisions worth knowing
 
 **One WAL per group, not one shared log.** A shared log is what databases do, and it is wrong here. A queue

@@ -4,5 +4,8 @@
     "dashboard": {
       "enabled": true
     }
+  },
+  "appHost": {
+    "path": "Blun.MultiRaft.AppHost.csproj"
   }
 }

@@ -12,10 +12,17 @@
 
   <ItemGroup>
     <PackageReference Include="Aspire.Hosting.AppHost" />
+    <PackageReference Include="Aspire.Hosting.JavaScript" />
+  </ItemGroup>
+
+  <!-- The control plane serves HTTP from inside the app host process; nothing else here needs ASP.NET Core. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Blun.MultiRaft.Node/Blun.MultiRaft.Node.csproj" />
+    <ProjectReference Include="../Blun.MultiRaft.Observer/Blun.MultiRaft.Observer.csproj" />
   </ItemGroup>
 
 </Project>

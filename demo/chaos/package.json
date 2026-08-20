@@ -1,0 +1,15 @@
+{
+  "name": "blun-multiraft-demo-chaos",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Drives the running demo cluster: chaos rounds, log scanning, and a browser pass over the observer UI.",
+  "scripts": {
+    "chaos": "node chaos.mjs runs/latest 8",
+    "scan": "node scan.mjs runs/latest",
+    "ui": "node ui.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.0"
+  }
+}

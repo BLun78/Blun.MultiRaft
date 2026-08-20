@@ -429,6 +429,37 @@ public sealed class ReservedGroupIdTests
 /// </remarks>
 public sealed class ClusterOnSegmentedLogTests
 {
+    /// <summary>
+    /// The whole cluster stops and comes back. Nothing seeds a cluster that already exists, so every node is
+    /// handed <see cref="RaftMembership.Empty"/> and rebuilds the voter set by replaying its own log — and
+    /// the role it takes has to come from what the replay reconstructed, not from what it was handed. Taking
+    /// it from the parameter makes every restarted node a learner, learners never campaign, and the
+    /// administrative plane then sits at its last term forever with nobody standing for election. The queue
+    /// groups keep working throughout, which is what makes it easy to miss.
+    /// </summary>
+    [Fact]
+    public async Task ARestartedClusterElectsAnAdministrativeLeaderAgain()
+    {
+        await using var cluster = new ClusterTestCluster(onDisk: true);
+        await cluster.AddNodesAsync(1, 2, 3);
+        await cluster.WaitForFormedAsync();
+
+        await cluster.RestartAllAsync();
+
+        await ClusterTestCluster.WaitUntilAsync(
+            () => cluster.Nodes.Any(n => n.Coordinator.IsClusterLeader),
+            "the administrative plane to elect a leader after the whole cluster restarted",
+            TimeSpan.FromSeconds(30));
+
+        Assert.All(
+            cluster.Nodes,
+            node =>
+            {
+                Assert.NotEqual(RaftRole.Learner, node.Coordinator.Group!.Role);
+                Assert.Equal(3, node.Coordinator.Group!.Membership.Voters.Length);
+            });
+    }
+
     [Fact]
     public async Task AColdClusterFormsAndEveryNodeAgreesOnTheVoterSet()
     {

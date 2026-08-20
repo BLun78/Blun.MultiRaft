@@ -33,8 +33,12 @@ dotnet run -c Release --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRa
 # The gRPC multiplexing benchmark is a plain console harness, not BenchmarkDotNet
 dotnet run -c Release --project benchmark/Blun.MultiRaft.Grpc.Benchmarks/Blun.MultiRaft.Grpc.Benchmarks.csproj
 
-# Aspire demo: three nodes, real gRPC, /status on 8101-8103
+# Aspire demo: five nodes, real gRPC, /status on 8101-8105, observer UI on 4200
+# (control plane 8200, observer API 8300; delete demo/Blun.MultiRaft.AppHost/data/ first)
 dotnet run --project demo/Blun.MultiRaft.AppHost/Blun.MultiRaft.AppHost.csproj
+
+# The observer UI on its own (the Aspire run starts it too, if Node.js is on PATH)
+npm --prefix demo/Blun.MultiRaft.Observer.Ui start
 ```
 
 ## Shell safety
@@ -74,7 +78,8 @@ CI (`.github/workflows/ci.yml`) runs the full matrix on push/PR to `main`.
   ```
 
   EventId ranges: 1000–1016 Core Raft (`RaftGroupInstance.Log`), 1100+ Host (`HostLog`), 1200+ Cluster
-  coordinator (`ClusterLog`), 1300+ gRPC transport (`GrpcLog`), 2000+ Demo node (`NodeStartedLog`).
+  coordinator (`ClusterLog`), 1300+ gRPC transport (`GrpcLog`), 2000+ Demo node (`NodeStartedLog`), 2100+
+  Observer (`ObserverLog`), 2200+ App-host control plane (`ControlPlaneLog`).
 - Code must be trim-safe and AOT-compatible.
 - Throw `InvalidOperationException` for integrity violations; `IOException` for transport failures. This
   distinction is load-bearing: the replication loop treats `IOException` as an ordinary retryable condition,
@@ -97,7 +102,8 @@ without dragging elections and transports along.
 | `src/Blun.MultiRaft.Wal` | `RaftGroupId`, `RaftLogEntry`, `IRaftWal` and its implementations (`InMemoryRaftWal`, `SegmentedRaftWal`) |
 | `src/Blun.MultiRaft` | `NodeId`, `RaftGroupInstance`, membership, transport contracts, `MultiRaftHost`, `ClusterCoordinator` |
 | `src/Blun.MultiRaft.Grpc` | gRPC transport implementation |
-| `demo/Blun.MultiRaft.Node` + `demo/Blun.MultiRaft.AppHost` | Aspire-based demo cluster |
+| `demo/Blun.MultiRaft.Node` + `demo/Blun.MultiRaft.AppHost` | Aspire-based demo cluster, five nodes |
+| `demo/Blun.MultiRaft.Observer` + `demo/Blun.MultiRaft.Observer.Ui` | Aggregating watcher and its Angular/Tailwind UI |
 
 `RaftGroupId` lives in the WAL project (not core) because a log is keyed by group, and `IRaftWalFactory` has
 to say so without knowing what a group *does*.
@@ -173,6 +179,14 @@ Inside `src/Blun.MultiRaft`:
 - **Load reports are pushed, never logged.** Leader counts change on every election of every group; putting
   them through the cluster group's log would be a write firehose on the one group that must stay responsive.
   Soft state, held in memory on the cluster leader, aged out by TTL.
+- **A node with history is handed `RaftMembership.Empty` on purpose, and its *role* must come from the
+  replay, not from what it was handed.** `RaftGroupInstance.StartAsync` replays membership entries over the
+  configuration it is given; reading `membership.IsVoter(Self)` (the parameter) instead of
+  `Membership.IsVoter(Self)` (the replayed state) made every restarted node a learner, and learners never
+  campaign. A whole cluster coming back from disk then sat at its last term forever with nobody standing for
+  election, while the queue groups — which are handed a real voter set — kept working perfectly, so nothing
+  looked broken except an administrative plane stuck on `AdminSuspended`. Covered by
+  `ClusterOnSegmentedLogTests.ARestartedClusterElectsAnAdministrativeLeaderAgain`.
 - **Bootstrap rule (`ClusterCoordinator.ShouldSeed`) is safety-critical.** A fresh node must NOT start as a
   voter: two empty logs are equally complete under the election restriction, so two fresh voters will elect
   one of themselves and truncate the node that actually had data. Fresh nodes start with
@@ -185,6 +199,55 @@ Inside `src/Blun.MultiRaft`:
 - **`SingleNodeRaftTransport` throws `InvalidOperationException`, not `IOException`.** In single-node mode
   nothing should ever address a peer; `IOException` would be retried forever by the replication loop instead
   of reporting the problem.
+
+### The demo and its observer
+
+- **Five nodes, so the quorum is three.** The demo exists to make failure states reachable by hand: one node
+  down changes nothing, two still work, the third stops writes. With three nodes only the first and last of
+  those exist.
+- **The control plane lives inside the app host because it has to.** `ResourceCommandService`,
+  `ResourceLoggerService` and `ResourceNotificationService` exist only in that process; anything outside it
+  would be hunting OS process handles, which is precisely the platform-specific mess avoided everywhere else.
+  It binds to loopback and refuses any resource name it was not given at construction — it can stop processes.
+- **`ResourceLoggerService` is keyed by the DCP instance id, not the resource's display name.**
+  `WatchAsync("raft-node-1")` does not throw; it yields nothing, forever, and looks exactly like a resource
+  that has not logged yet. Resolve the id with `ResourceNotificationService.TryGetCurrentState(name, out e)`
+  and use `e.ResourceId`. Commands, unlike logs, do accept the display name. A stream opened this way does
+  survive the resource being restarted — measured, not assumed: the console output of the new process keeps
+  arriving on the connection that was already open.
+- **WAL size in the demo is measured off the filesystem, not counted.** `RaftNodeHost.MeasureWal` walks
+  `<data>/wal/g<group padded to 20>` and sums the file lengths, which couples the demo to
+  `SegmentedRaftWalFactory`'s directory naming on purpose: a counter of appended bytes would miss the
+  allocated-but-not-yet-full segment, and the number people want is what the disk is holding.
+- **The generated traffic is paced by the commit, not by the interval.** `POST /groups/{id}/messages` runs on
+  the group's leader and waits for each append's durability before the next, so a 10 ms interval yields
+  roughly 36–42 writes a second on this machine. The UI reports the *measured* rate for that reason; do not
+  relabel it as the requested one.
+- **The demo offers two different kinds of "out", and they must not be conflated.** Stopping a resource ends
+  the process; `DELETE /cluster/nodes/{id}` leaves it running and takes it out of the cluster group's
+  configuration. The second is a single-server membership change and only the cluster leader can serve it,
+  which is why the observer routes it to the leader instead of to any answering node the way it routes
+  placement. The removal is then undone by the coordinator's own reconcile pass — that is correct, not a bug.
+- **Resource commands must not take the request's cancellation token.** A client that disconnects mid-flight
+  would otherwise leave the command cancelled somewhere in the middle (`Command 'stop' was canceled` in the
+  resource's log) with the resource in whichever state it reached.
+- **The UI gets *one* log stream for all five nodes, and that is load-bearing.** A browser allows six
+  concurrent connections per origin over HTTP/1.1. Five per-node log streams plus the cluster stream is
+  exactly six, so every subsequent request — every button on the page — queued behind connections that never
+  end. Nothing failed: the POSTs were issued and simply never got a turn, while curl against the same URL
+  answered in six milliseconds. `LogStream` fans the five in on the server and tags each line with its node,
+  which is the same trade the gRPC transport makes one layer down. Adding a second long-lived stream to that
+  page reintroduces the bug.
+- **An SSE endpoint must flush before its first payload.** ASP.NET Core holds the headers until something is
+  written, so a stream whose source is quiet never begins its response and the client sees a hung request
+  rather than an open stream.
+- **Group ids reach the browser as strings.** `RaftGroupId.Cluster` is `ulong.MaxValue`, which a JavaScript
+  number cannot hold exactly; sent as a number it arrives rounded and the UI addresses a group that does not
+  exist.
+- **Aspire's resource state and "does the node answer" are separate facts, and the UI keeps them apart.** A
+  node can be `Running` and silent. Collapsing the two would hide the failure mode the demo exists to show.
+- **The cluster leader shown in the UI is a tally of what each node believes, not a fact.** Nodes disagree
+  during an election; the UI says "disputed" rather than picking one.
 
 ## No known open defects
 

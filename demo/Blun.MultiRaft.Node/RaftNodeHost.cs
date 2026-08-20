@@ -41,6 +41,7 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
     private GrpcRaftTransport? _transport;
     private MultiRaftHost? _host;
     private ClusterCoordinator? _cluster;
+    private MessageSender? _sender;
     private Task? _events;
     private CancellationTokenSource? _stopping;
 
@@ -139,6 +140,8 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
             await _host.AddGroupAsync(group, membership, null, options, cancellationToken).ConfigureAwait(false);
         }
 
+        _sender = new MessageSender(_host, _loggerFactory.CreateLogger<MessageSender>());
+
         NodeStartedLog.Started(_logger, _self.Value, _peers.Count, Groups.Length);
     }
 
@@ -171,6 +174,178 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
             lag = response.Lag,
             transferred = response.Transferred,
         };
+    }
+
+    /// <summary>
+    /// Takes a node out of the cluster group's configuration, or puts it back in as a learner. Cluster
+    /// leader only — a membership change is an append, and only a leader appends.
+    /// </summary>
+    /// <remarks>
+    /// A removal does not stick while the node is still configured on this one: the coordinator's reconcile
+    /// pass adopts any configured node missing from the membership and promotes it back one per pass. That
+    /// is the mechanism working, not fighting the request, and watching a node go out and come back is the
+    /// clearest demonstration of the single-server change rule there is.
+    /// </remarks>
+    public async Task<object> ChangeMembershipAsync(ulong node, bool remove)
+    {
+        if (_cluster?.Group is not { IsLeader: true } group)
+        {
+            return new
+            {
+                node,
+                applied = false,
+                error = "not the cluster leader",
+                clusterLeader = _cluster?.ClusterLeader?.Value.ToString(CultureInfo.InvariantCulture),
+            };
+        }
+
+        var target = new NodeId(node);
+
+        try
+        {
+            return await ApplyMembershipAsync(group, target, node, remove).ConfigureAwait(false);
+        }
+        catch (NotLeaderException)
+        {
+            // Checked IsLeader a moment ago and it was true; leadership can move between the two. The race
+            // is the cluster working, so it is reported as an answer rather than thrown at the caller.
+            return new { node, applied = false, error = "leadership moved while the change was being applied" };
+        }
+    }
+
+    private async Task<object> ApplyMembershipAsync(RaftGroupInstance group, NodeId target, ulong node, bool remove)
+    {
+        if (remove)
+        {
+            if (target == _self)
+            {
+                // Removing the leader from its own configuration is a leadership question, not a membership
+                // one; it belongs on the transfer path where a successor is chosen first.
+                return new { node, applied = false, error = "the cluster leader cannot remove itself" };
+            }
+
+            if (group.Membership.Voters.Length <= 3)
+            {
+                return new { node, applied = false, error = "refusing to shrink the voter set below three" };
+            }
+
+            await group.RemoveNodeAsync(target).ConfigureAwait(false);
+        }
+        else
+        {
+            await group.AddLearnerAsync(target).ConfigureAwait(false);
+        }
+
+        return new
+        {
+            node,
+            applied = true,
+            removed = remove,
+            voters = group.Membership.Voters.Select(v => v.Value).ToArray(),
+            learners = group.Membership.Learners.Select(v => v.Value).ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// Starts a run of dummy traffic into a group, so its write-ahead log has something in it. Leader only —
+    /// an append goes to the leader, and the observer routes the request there.
+    /// </summary>
+    public object StartSending(ulong group, int count, int intervalMs, int size)
+        => _sender is null
+            ? new { group, started = false, error = "the node is not running" }
+            : _sender.Start(group, count, TimeSpan.FromMilliseconds(Math.Max(1, intervalMs)), Math.Max(16, size));
+
+    /// <summary>Stops a run that is in progress.</summary>
+    public object StopSending(ulong group)
+    {
+        _sender?.Stop(group);
+        return new { group, stopping = true };
+    }
+
+    /// <summary>
+    /// What this node's copy of a group's log costs on disk, and what is in it.
+    /// </summary>
+    /// <remarks>
+    /// Measured by walking the directory rather than asked of the log, because the number that matters here
+    /// is what the filesystem holds, segments and all — a counter of bytes appended would not include the
+    /// segment that is allocated and not yet full. The layout is the factory's (<c>g</c> plus the group id,
+    /// zero-padded), which is a coupling the demo accepts to be able to show real bytes.
+    /// </remarks>
+    private object DescribeWal(RaftGroupId group, RaftGroupInstance? instance)
+    {
+        (long bytes, int files) = MeasureWal(group);
+
+        long first = instance?.FirstIndex ?? 0;
+        long last = instance?.LastIndex ?? 0;
+        long entries = last > 0 && last >= first ? last - first + 1 : 0;
+
+        return new
+        {
+            sizeBytes = bytes,
+            segments = files,
+            firstIndex = first,
+            lastIndex = last,
+            entries,
+            bytesPerEntry = entries > 0 ? bytes / entries : 0,
+        };
+    }
+
+    private (long Bytes, int Files) MeasureWal(RaftGroupId group)
+    {
+        if (string.IsNullOrWhiteSpace(_dataDirectory))
+        {
+            return (0, 0);
+        }
+
+        string directory = Path.Combine(
+            _dataDirectory,
+            "wal",
+            "g" + group.Value.ToString("D20", CultureInfo.InvariantCulture));
+
+        if (!Directory.Exists(directory))
+        {
+            return (0, 0);
+        }
+
+        long bytes = 0;
+        int files = 0;
+
+        foreach (string file in Directory.EnumerateFiles(directory))
+        {
+            try
+            {
+                bytes += new FileInfo(file).Length;
+                files++;
+            }
+            catch (IOException)
+            {
+                // A segment being rolled underneath the walk is not worth failing a status request over.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Same.
+            }
+        }
+
+        return (bytes, files);
+    }
+
+    private object? DescribeSend(ulong group)
+    {
+        SendJob? job = _sender?.Job(group);
+
+        return job is null
+            ? null
+            : new
+            {
+                running = job.Running,
+                sent = job.Sent,
+                failed = job.Failed,
+                total = job.Total,
+                size = job.Size,
+                ratePerSecond = Math.Round(job.RatePerSecond, 1),
+                error = job.Error,
+            };
     }
 
     /// <summary>What the cluster leader believes each node is carrying. Empty anywhere else.</summary>
@@ -208,13 +383,29 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
                 clusterLeader = _cluster?.ClusterLeader?.Value.ToString(CultureInfo.InvariantCulture),
                 voters = _cluster?.Group?.Membership.Voters.Select(v => v.Value).ToArray() ?? [],
                 learners = _cluster?.Group?.Membership.Learners.Select(v => v.Value).ToArray() ?? [],
+
+                // The administrative group's own Raft state, shaped exactly like a queue group's entry
+                // below. It is a Raft group like any other and reading it next to them is the point --
+                // "the cluster is fine" and "the group that decides that is fine" are separate claims.
+                group = DescribeClusterGroup(),
                 recentEvents = RecentEvents(),
             },
             groups = Groups.Select(group =>
             {
                 if (_host is null || !_host.TryGetGroup(group, out RaftGroupInstance? instance) || instance is null)
                 {
-                    return new { group = group.Value, role = "unknown", term = 0L, leader = (string?)null, commitIndex = 0L };
+                    // The log is still measured: a group this node has not opened may well have segments on
+                    // disk from before it was restarted, and that is worth seeing rather than hiding.
+                    return new
+                    {
+                        group = group.Value,
+                        role = "unknown",
+                        term = 0L,
+                        leader = (string?)null,
+                        commitIndex = 0L,
+                        wal = DescribeWal(group, null),
+                        send = DescribeSend(group.Value),
+                    };
                 }
 
                 return new
@@ -224,9 +415,29 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
                     term = instance.CurrentTerm,
                     leader = instance.LeaderId?.Value.ToString(CultureInfo.InvariantCulture),
                     commitIndex = instance.CommitIndex,
+                    wal = DescribeWal(group, instance),
+                    send = DescribeSend(group.Value),
                 };
             }).ToArray(),
         };
+
+    private object? DescribeClusterGroup()
+    {
+        RaftGroupInstance? instance = _cluster?.Group;
+
+        return instance is null
+            ? null
+            : new
+            {
+                group = RaftGroupId.Cluster.Value,
+                role = instance.Role.ToString(),
+                term = instance.CurrentTerm,
+                leader = instance.LeaderId?.Value.ToString(CultureInfo.InvariantCulture),
+                commitIndex = instance.CommitIndex,
+                wal = DescribeWal(RaftGroupId.Cluster, instance),
+                send = DescribeSend(RaftGroupId.Cluster.Value),
+            };
+    }
 
     /// <inheritdoc />
     public ValueTask<AppendEntriesResponse> OnAppendEntriesAsync(
@@ -340,6 +551,14 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
             }
 
             _events = null;
+        }
+
+        if (_sender is not null)
+        {
+            // Before the host: a run still appending into a group being torn down would spend its last
+            // moments logging failures about it.
+            await _sender.DisposeAsync().ConfigureAwait(false);
+            _sender = null;
         }
 
         if (_cluster is not null)

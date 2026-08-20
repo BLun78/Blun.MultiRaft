@@ -63,7 +63,10 @@ builder.WebHost.ConfigureKestrel(options =>
     options.ConfigureRaftEndpoint(IPAddress.Loopback, raftPort, protocol, configureListen: configureRaftListen);
     options.ConfigureRaftEndpoint(IPAddress.IPv6Loopback, raftPort, protocol, configureListen: configureRaftListen);
 
-    options.ListenLocalhost(statusPort, listen => listen.Protocols = HttpProtocols.Http1 | HttpProtocols.Http2);
+    // HTTP/1.1 only, and deliberately so. Offering Http1AndHttp2 on a cleartext port cannot work -- there is
+    // no ALPN without TLS to negotiate with -- and Kestrel says so, once per endpoint per start, which is a
+    // warning about nothing in a log where warnings should mean something.
+    options.ListenLocalhost(statusPort, listen => listen.Protocols = HttpProtocols.Http1);
 });
 
 builder.Services.AddGrpc();
@@ -97,8 +100,33 @@ app.MapGet("/cluster/load", (RaftNodeHost host) => Results.Json(host.DescribeLoa
 
 // Placement, driven from outside. The library never moves a leader on its own; this is the door it moves
 // through. `node` may be omitted to let the group's leader pick the best-placed candidate itself.
+// No :long route constraint. The cluster group's id is ulong.MaxValue, which does not fit in a long, so the
+// constraint quietly refused to match the one group whose leadership is most interesting to move -- a 404
+// with an empty body, indistinguishable from a request that did nothing.
 app.MapPost(
-    "/cluster/groups/{group:long}/leader",
+    "/cluster/groups/{group}/leader",
     async (RaftNodeHost host, ulong group, ulong? node) => Results.Json(await host.RequestLeaderAsync(group, node)));
+
+// Dummy traffic, so the write-ahead log has something in it to look at. Leader only -- an append goes to the
+// leader -- and the run happens on the node, one message every `intervalMs`, rather than as one request per
+// message from outside.
+app.MapPost(
+    "/groups/{group}/messages",
+    (RaftNodeHost host, ulong group, int? count, int? intervalMs, int? size)
+        => Results.Json(host.StartSending(group, count ?? 100, intervalMs ?? 10, size ?? 256)));
+
+app.MapDelete(
+    "/groups/{group}/messages",
+    (RaftNodeHost host, ulong group) => Results.Json(host.StopSending(group)));
+
+// Membership, driven from outside: a node out of the cluster group's configuration and back in. Only the
+// cluster leader can answer these, because only a leader appends.
+app.MapDelete(
+    "/cluster/nodes/{node}",
+    async (RaftNodeHost host, ulong node) => Results.Json(await host.ChangeMembershipAsync(node, remove: true)));
+
+app.MapPost(
+    "/cluster/nodes/{node}",
+    async (RaftNodeHost host, ulong node) => Results.Json(await host.ChangeMembershipAsync(node, remove: false)));
 
 app.Run();
