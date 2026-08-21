@@ -917,7 +917,11 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         finally
         {
             _stateGate.Release();
-            _ = ApplyCommittedAsync();
+
+            // .AsTask(), not a bare discard: a ValueTask must be consumed exactly once, and with
+            // ValueTask-pooling enabled, discarding it while it is still running lets the pool recycle the
+            // underlying IValueTaskSource out from under this call.
+            _ = ApplyCommittedAsync().AsTask();
         }
     }
 
@@ -1801,7 +1805,9 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
 
         Volatile.Write(ref _commitIndex, candidate);
         ReleaseCommitWaiters(candidate);
-        _ = ApplyCommittedAsync();
+
+        // .AsTask(), not a bare discard: see the identical comment on the OnAppendEntriesAsync call site.
+        _ = ApplyCommittedAsync().AsTask();
     }
 
     private void ReleaseCommitWaiters(long committed)
@@ -1852,34 +1858,44 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     {
         if (!await _applyGate.WaitAsync(0).ConfigureAwait(false))
         {
-            // Another apply pass is already running; it will pick up whatever this one would have.
+            // Another apply pass is already running. Its target was read before this caller arrived, so a
+            // commit that lands in between is not covered by "it will pick up whatever this one would have"
+            // -- that assumption is false. The while loop below re-checks _commitIndex after every batch
+            // instead, so the running pass keeps going until it is genuinely caught up, and this caller can
+            // safely return without losing the wakeup.
             return;
         }
 
         try
         {
-            long committed = Volatile.Read(ref _commitIndex);
-            long applied = Volatile.Read(ref _lastApplied);
-            if (applied >= committed)
+            while (Volatile.Read(ref _lastApplied) < Volatile.Read(ref _commitIndex))
             {
-                return;
-            }
+                long committed = Volatile.Read(ref _commitIndex);
+                long applied = Volatile.Read(ref _lastApplied);
 
-            await foreach (RaftLogEntry entry in _wal
-                .ReadFromAsync(applied + 1, committed, _shutdown.Token)
-                .ConfigureAwait(false))
-            {
-                if (entry.Kind == RaftEntryKind.Command)
+                await foreach (RaftLogEntry entry in _wal
+                    .ReadFromAsync(applied + 1, committed, _shutdown.Token)
+                    .ConfigureAwait(false))
                 {
-                    await _stateMachine.ApplyAsync(Group, entry, _shutdown.Token).ConfigureAwait(false);
-                }
+                    if (entry.Kind == RaftEntryKind.Command)
+                    {
+                        await _stateMachine.ApplyAsync(Group, entry, _shutdown.Token).ConfigureAwait(false);
+                    }
 
-                Volatile.Write(ref _lastApplied, entry.Index);
+                    Volatile.Write(ref _lastApplied, entry.Index);
+                }
             }
         }
         catch (OperationCanceledException)
         {
             // Shutting down.
+        }
+        catch (Exception ex)
+        {
+            // _stateMachine.ApplyAsync is host code this library knows nothing about. Left uncaught, the
+            // exception used to vanish inside a discarded ValueTask: _lastApplied would freeze forever while
+            // the group kept replicating and committing as if healthy, with no log line anywhere saying why.
+            Log.StateMachineApplyFailed(_logger, ex, Group.Value);
         }
         finally
         {

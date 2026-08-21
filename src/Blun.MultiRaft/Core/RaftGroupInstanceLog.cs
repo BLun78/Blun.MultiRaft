@@ -134,5 +134,12 @@ public sealed partial class RaftGroupInstance
             Level = LogLevel.Warning,
             Message = "Raft group {Group}: an election started by node {Node} failed.")]
         public static partial void ElectionFailed(ILogger logger, Exception exception, ulong group, ulong node);
+
+        [LoggerMessage(
+            EventId = 1017,
+            Level = LogLevel.Error,
+            Message = "Raft group {Group}: applying committed entries to the state machine failed. " +
+                "Entries at or after the last successfully applied index will not be retried until the next commit.")]
+        public static partial void StateMachineApplyFailed(ILogger logger, Exception exception, ulong group);
     }
 }
