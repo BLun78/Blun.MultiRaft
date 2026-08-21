@@ -22,3 +22,6 @@ Thumbs.db
 
 ## Local node data written by the demo
 demo/**/data/
+
+## Claude Code worktrees (local, per-session)
+.claude/worktrees/
