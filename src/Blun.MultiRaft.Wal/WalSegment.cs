@@ -206,8 +206,17 @@ internal sealed class WalSegment : IDisposable
         TrimToLength();
     }
 
+    // FileShare.Delete, not just ReadWrite: a follower read can hold this handle open for the length of a
+    // replication round while a concurrent TruncateHeadAsync deletes the segment underneath it. On Windows,
+    // where FileShare is enforced rather than advisory, a handle opened without FILE_SHARE_DELETE turns that
+    // delete into an IOException instead of the POSIX-style detach-and-continue Unix gives for free.
     public SafeFileHandle OpenRead()
-        => File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileOptions.Asynchronous);
+        => File.OpenHandle(
+            Path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            FileOptions.Asynchronous);
 
     public long TermAt(long index)
     {

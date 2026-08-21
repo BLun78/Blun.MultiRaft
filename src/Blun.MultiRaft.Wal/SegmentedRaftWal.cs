@@ -51,6 +51,12 @@ public sealed class SegmentedRaftWal : IRaftWal
 
     private WalSegment[] _segments = [];
     private WalSegment? _active;
+
+    // Segments whose file delete failed (Windows only: a reader still had the file open without
+    // FileShare.Delete). Already dropped from _segments by the time they land here, so leaving them
+    // undeleted costs disk space, never correctness; each truncation retries whatever is still pending.
+    private readonly List<WalSegment> _pendingDeletes = [];
+
     private long _firstIndex = 1;
     private long _lastIndex;
     private long _lastTerm;
@@ -477,18 +483,48 @@ public sealed class SegmentedRaftWal : IRaftWal
             long baseIndex = boundary.LastIndex;
             long baseTerm = boundary.TermAt(baseIndex);
 
-            foreach (WalSegment segment in doomed)
-            {
-                segment.Delete();
-            }
-
+            // _segments/_firstIndex/base are updated BEFORE the files are deleted, not after. A segment that
+            // fails to delete (Windows: a follower's ReadFromAsync still has it open -- see WalSegment.OpenRead)
+            // now just costs disk space, retried on the next truncation. Deleting first and updating state
+            // second, the old order, left a segment removed from disk but still listed in _segments whenever
+            // the delete succeeded but the process crashed before the state write -- every read of it then
+            // failed with FileNotFoundException, a correctness bug rather than a space leak.
             Volatile.Write(ref _segments, [.. kept]);
             Volatile.Write(ref _firstIndex, kept.Count > 0 ? kept[0].FirstIndex : _lastIndex + 1);
             await SetBaseAsync(baseIndex, baseTerm, cancellationToken).ConfigureAwait(false);
+
+            DeleteSegments(doomed);
         }
         finally
         {
             _writeGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Deletes each segment's file, retrying anything left over from a previous call first. A segment whose
+    /// delete fails (Windows: a concurrent reader still has it open without FileShare.Delete) is kept for the
+    /// next attempt rather than lost track of -- it has already been dropped from <see cref="_segments"/>, so
+    /// the cost of leaving it undeleted a while longer is disk space, not correctness.
+    /// </summary>
+    private void DeleteSegments(List<WalSegment> segments)
+    {
+        if (_pendingDeletes.Count > 0)
+        {
+            segments = [.. _pendingDeletes, .. segments];
+            _pendingDeletes.Clear();
+        }
+
+        foreach (WalSegment segment in segments)
+        {
+            try
+            {
+                segment.Delete();
+            }
+            catch (IOException)
+            {
+                _pendingDeletes.Add(segment);
+            }
         }
     }
 
@@ -502,11 +538,7 @@ public sealed class SegmentedRaftWal : IRaftWal
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            foreach (WalSegment segment in _segments)
-            {
-                segment.Delete();
-            }
-
+            List<WalSegment> doomed = [.. _segments];
             Volatile.Write(ref _segments, []);
             _active = null;
 
@@ -517,6 +549,8 @@ public sealed class SegmentedRaftWal : IRaftWal
             // A snapshot is durable by the time it is installed, so everything it covers is durable too.
             Volatile.Write(ref _durableIndex, lastIncludedIndex);
             await SetBaseAsync(lastIncludedIndex, lastIncludedTerm, cancellationToken).ConfigureAwait(false);
+
+            DeleteSegments(doomed);
         }
         finally
         {
