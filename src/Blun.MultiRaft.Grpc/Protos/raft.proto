@@ -19,24 +19,31 @@ message RaftFrame {
   uint64 correlation_id = 1;
 
   // Which Raft group this frame belongs to. Present on every frame -- it is what multiplexing means here.
+  // RaftGroupId.Cluster (ulong.MaxValue internally) is remapped to 0 on the wire by RaftGroupWireId --
+  // a varint with every bit set costs 10 bytes, and this field rides every frame the cluster group sends.
+  // See RaftGroupWireId for the mapping; RaftGroupId itself is untouched.
   uint64 group_id = 2;
 
+  // Field numbers 3-15 cost a 1-byte tag; 16+ costs 2 bytes (protobuf varint tag encoding). No wire
+  // compatibility is promised for this protocol, so slots are assigned by expected traffic share, not
+  // insertion order: AppendEntries/Reply and ReadIndex/Reply dominate steady-state traffic, LeaderTarget
+  // and its reply are the rarest (cluster rebalancing only) and are the ones left paying 2 bytes.
   oneof payload {
-    AppendEntries append_entries = 10;
-    AppendEntriesReply append_entries_reply = 11;
-    Vote vote = 12;
-    VoteReply vote_reply = 13;
-    InstallSnapshot install_snapshot = 14;
-    SnapshotChunk snapshot_chunk = 15;
-    InstallSnapshotReply install_snapshot_reply = 16;
-    ReadIndex read_index = 17;
-    ReadIndexReply read_index_reply = 18;
-    TimeoutNow timeout_now = 19;
-    TimeoutNowReply timeout_now_reply = 20;
-    NodeLoad node_load = 21;
-    NodeLoadReply node_load_reply = 22;
-    LeaderTarget leader_target = 23;
-    LeaderTargetReply leader_target_reply = 24;
+    AppendEntries append_entries = 3;
+    AppendEntriesReply append_entries_reply = 4;
+    ReadIndex read_index = 5;
+    ReadIndexReply read_index_reply = 6;
+    NodeLoad node_load = 7;
+    NodeLoadReply node_load_reply = 8;
+    Vote vote = 9;
+    VoteReply vote_reply = 10;
+    TimeoutNow timeout_now = 11;
+    TimeoutNowReply timeout_now_reply = 12;
+    InstallSnapshot install_snapshot = 13;
+    SnapshotChunk snapshot_chunk = 14;
+    InstallSnapshotReply install_snapshot_reply = 15;
+    LeaderTarget leader_target = 16;
+    LeaderTargetReply leader_target_reply = 17;
   }
 }
 
@@ -147,12 +154,10 @@ message NodeLoadReply {
 // is already on the frame. Only that group's leader can answer: the judgement rests on per-peer match
 // indices, and no other replica has them.
 message LeaderTarget {
-  uint64 candidate = 1;
-
-  // proto3 has no null, and node id 0 is a legal id -- so presence is carried explicitly rather than by
-  // treating some value as absent. Clear means "you choose".
-  bool has_candidate = 2;
-  bool execute = 3;
+  // proto3 message fields carry presence natively, and node id 0 is a legal id -- `optional` (proto3
+  // presence tracking) replaces a separate has_candidate bool. Clear means "you choose".
+  optional uint64 candidate = 1;
+  bool execute = 2;
 }
 
 message LeaderTargetReply {
