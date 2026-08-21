@@ -171,6 +171,12 @@ app.MapDelete(
     "/groups/{group}/messages",
     (RaftNodeHost host, ulong group) => Results.Json(host.StopSending(group)));
 
+// Captures this node's own applied state and compacts the log up to it. Local to this node -- unlike an
+// append, a snapshot needs no quorum -- so any answering node can serve this, not just the group's leader.
+app.MapPost(
+    "/groups/{group}/snapshot",
+    async (RaftNodeHost host, ulong group) => Results.Json(await host.TakeSnapshotAsync(group)));
+
 // Membership, driven from outside: a node out of the cluster group's configuration and back in. Only the
 // cluster leader can answer these, because only a leader appends.
 app.MapDelete(

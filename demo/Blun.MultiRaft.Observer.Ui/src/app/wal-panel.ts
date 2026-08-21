@@ -73,6 +73,18 @@ const BATCHES = [100, 1000, 10000] as const;
                       <span class="text-neutral-400 dark:text-neutral-600">({{ bytes(snapshot.sizeBytes) }})</span>
                     </div>
                   }
+
+                  @if (cell.online) {
+                    <button type="button"
+                            [attr.data-testid]="'snapshot-' + group.group + '-node-' + cell.node + '-take'"
+                            [disabled]="snapshotting().has(group.group + ':' + cell.node)"
+                            (click)="takeSnapshot(group, cell.node)"
+                            class="mt-0.5 rounded border border-neutral-300 px-1.5 py-0.5 text-[10px] font-medium
+                                   hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40
+                                   dark:border-neutral-700 dark:hover:bg-neutral-800">
+                      snapshot
+                    </button>
+                  }
                 </td>
               }
 
@@ -132,6 +144,7 @@ export class WalPanel {
 
   readonly batches = BATCHES;
   readonly pending = signal<ReadonlySet<string>>(new Set());
+  readonly snapshotting = signal<ReadonlySet<string>>(new Set());
 
   bytes = formatBytes;
   count = formatCount;
@@ -175,5 +188,20 @@ export class WalPanel {
 
   stop(group: GroupView): Promise<void> {
     return this.cluster.stopSending(group.group);
+  }
+
+  async takeSnapshot(group: GroupView, node: number): Promise<void> {
+    const key = `${group.group}:${node}`;
+    this.snapshotting.update((current) => new Set(current).add(key));
+
+    try {
+      await this.cluster.takeSnapshot(group.group, node);
+    } finally {
+      this.snapshotting.update((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
   }
 }

@@ -178,6 +178,16 @@ app.MapDelete("/api/groups/{group}/messages", (
     CancellationToken token)
     => Traffic.StopAsync(group, watcher, clients, token));
 
+// "Take a snapshot now", driven from the UI. `node` picks which node's own applied state to capture -- see
+// Snapshot for why this is not routed to the group's leader the way traffic and membership changes are.
+app.MapPost("/api/groups/{group}/snapshot/{node}", (
+    string group,
+    ulong node,
+    ClusterWatcher watcher,
+    IHttpClientFactory clients,
+    CancellationToken token)
+    => Snapshot.TakeAsync(group, node, watcher, clients, token));
+
 // Placement, driven from the UI. Any answering node may be asked -- the request is routed to the group's
 // leader wherever it is -- so the observer simply picks one that is talking to it.
 app.MapPost("/api/groups/{group}/leader", async (

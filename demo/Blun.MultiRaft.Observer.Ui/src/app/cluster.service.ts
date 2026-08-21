@@ -87,6 +87,20 @@ export class ClusterService {
   }
 
   /**
+   * Captures one node's own applied state as a snapshot and compacts its log up to it. Local to that node —
+   * unlike an append, this needs no quorum — so it can fail on its own if nothing has been applied yet.
+   */
+  async takeSnapshot(group: string, node: number): Promise<void> {
+    try {
+      const response = await fetch(`/api/groups/${group}/snapshot/${node}`, { method: 'POST' });
+      const body = await response.text();
+      this._lastResult.set(`snapshot ${group} @ node ${node}: ${response.ok ? body : `HTTP ${response.status} ${body}`}`);
+    } catch (error) {
+      this._lastResult.set(`snapshot ${group} @ node ${node} failed: ${error}`);
+    }
+  }
+
+  /**
    * Takes a node out of the cluster group's configuration, or puts it back as a learner. A removal does not
    * stick while the node is still configured on the others: the coordinator adopts it again within a
    * reconcile pass and promotes it back. Watching that happen is the point of the button.

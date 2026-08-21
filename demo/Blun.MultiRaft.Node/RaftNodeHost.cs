@@ -140,7 +140,13 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
 
         foreach (RaftGroupId group in Groups)
         {
-            await _host.AddGroupAsync(group, membership, null, options, cancellationToken).ConfigureAwait(false);
+            // A real host applies committed entries to actual state (Blun.MQ: an enqueue or a settlement).
+            // This demo has none, so DemoStateMachine only counts what it has seen -- just enough of a state
+            // machine for TakeSnapshotAsync to have something to capture and for the observer's "snapshot
+            // now" button to do something real.
+            await _host
+                .AddGroupAsync(group, membership, new DemoStateMachine(), options, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         _sender = new MessageSender(_host, _loggerFactory.CreateLogger<MessageSender>());
@@ -246,6 +252,30 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
             removed = remove,
             voters = group.Membership.Voters.Select(v => v.Value).ToArray(),
             learners = group.Membership.Learners.Select(v => v.Value).ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// Captures this node's own applied state as a snapshot and compacts the log up to it. Any node may take
+    /// one of its own state — unlike an append, this needs no quorum — so this is not routed to the leader
+    /// the way membership changes are; the observer still points the button at the group's leader by
+    /// convention, since that is the copy people are already looking at in the WAL panel.
+    /// </summary>
+    public async Task<object> TakeSnapshotAsync(ulong group)
+    {
+        var id = new RaftGroupId(group);
+
+        if (_host is null || !_host.TryGetGroup(id, out RaftGroupInstance? instance) || instance is null)
+        {
+            return new { group, taken = false, error = "the node is not running that group" };
+        }
+
+        bool taken = await instance.TakeSnapshotAsync().ConfigureAwait(false);
+        return new
+        {
+            group,
+            taken,
+            error = taken ? null : "nothing to snapshot yet -- no entries applied since the log's retained start",
         };
     }
 
