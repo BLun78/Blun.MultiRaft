@@ -304,8 +304,11 @@ public sealed class SegmentedRaftWal : IRaftWal
 
                     if (size > buffer.Length)
                     {
+                        // Rent before returning: if Rent throws, the old buffer must not already be back in
+                        // the pool, or two callers end up sharing it.
+                        byte[] larger = ArrayPool<byte>.Shared.Rent(size);
                         ArrayPool<byte>.Shared.Return(buffer);
-                        buffer = ArrayPool<byte>.Shared.Rent(size);
+                        buffer = larger;
                     }
 
                     Memory<byte> slot = buffer.AsMemory(0, size);
@@ -632,9 +635,14 @@ public sealed class SegmentedRaftWal : IRaftWal
         }
 
         byte[] buffer = [(byte)_options.ChecksumAlgorithm];
+
+        // FileMode.Create, not CreateNew: a crash between creating wal.cfg and writing its one byte leaves
+        // an empty file that LoadConfigAsync treats as "not written yet" (read < 1), so this runs again on
+        // the next append. Overwriting a single byte is harmless; CreateNew would throw on the existing file
+        // and leave the log permanently unwritable.
         using SafeFileHandle handle = File.OpenHandle(
             ConfigPath,
-            FileMode.CreateNew,
+            FileMode.Create,
             FileAccess.Write,
             FileShare.ReadWrite);
         RandomAccess.Write(handle, buffer, 0);

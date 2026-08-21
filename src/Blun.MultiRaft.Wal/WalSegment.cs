@@ -140,8 +140,11 @@ internal sealed class WalSegment : IDisposable
 
                 if (size > buffer.Length)
                 {
+                    // Rent before returning: if Rent throws (an oversized request from the wire), the old
+                    // buffer must not already be back in the pool, or two callers end up sharing it.
+                    byte[] larger = ArrayPool<byte>.Shared.Rent(size);
                     ArrayPool<byte>.Shared.Return(buffer);
-                    buffer = ArrayPool<byte>.Shared.Rent(size);
+                    buffer = larger;
                 }
 
                 int read = await RandomAccess
