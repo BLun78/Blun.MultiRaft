@@ -159,7 +159,17 @@ internal sealed class ClusterWatcher(
 
         await Task.WhenAll([.. polls.Cast<Task>(), resources]).ConfigureAwait(false);
 
-        Dictionary<ulong, ResourceState> states = resources.Result.ToDictionary(r => r.Node);
+        // Not ToDictionary(r => r.Node): the control plane's answer is expected to carry one entry per
+        // options.Nodes, but that uniqueness is an assumption about the far side's configuration, not
+        // something enforced here. A duplicate Node in the response used to throw ArgumentException out of
+        // this method, which the outer catch in ExecuteAsync (D-006's own note) swallowed -- the watcher
+        // survived, but the cluster view froze with the reason visible only in the log. The last write wins
+        // instead, which is the same outcome a healthy, duplicate-free response already produces.
+        Dictionary<ulong, ResourceState> states = [];
+        foreach (ResourceState state in resources.Result)
+        {
+            states[state.Node] = state;
+        }
         (ObservedNode Node, NodeStatus? Status, long Latency, string? Error)[] answers =
             [.. polls.Select(p => p.Result)];
 
