@@ -22,6 +22,14 @@ public static class RaftKestrelExtensions
     public const int DefaultMaxStreamsPerConnection = 4096;
 
     /// <summary>
+    /// Default for <c>KestrelServerOptions.Limits.MaxConcurrentConnections</c> on a Raft endpoint
+    /// (SEC-004): <see cref="DefaultMaxStreamsPerConnection"/> is raised well past Kestrel's own default with
+    /// no matching cap on the number of *connections*, so the two together bounded neither side. A cluster
+    /// normally holds one connection per peer, so this is generous headroom, not a tight budget.
+    /// </summary>
+    public const int DefaultMaxConcurrentConnections = 256;
+
+    /// <summary>
     /// Configures one Kestrel endpoint for the Raft protocol: the chosen HTTP version, and a per-connection
     /// concurrent-stream ceiling raised well past Kestrel's default of 100.
     /// </summary>
@@ -55,7 +63,8 @@ public static class RaftKestrelExtensions
         RaftGrpcProtocol protocol = RaftGrpcProtocol.Http2,
         int maxStreamsPerConnection = DefaultMaxStreamsPerConnection,
         Action<ListenOptions>? configureListen = null,
-        bool allowCleartext = false)
+        bool allowCleartext = false,
+        int maxConcurrentConnections = DefaultMaxConcurrentConnections)
     {
         // HTTP/3 mandates TLS at the QUIC layer, so there is no cleartext case to guard there. For HTTP/2, an
         // endpoint with no configureListen callback has no way to have called UseHttps, so it is h2c -- the
@@ -72,6 +81,7 @@ public static class RaftKestrelExtensions
         }
 
         options.Limits.Http2.MaxStreamsPerConnection = maxStreamsPerConnection;
+        options.Limits.MaxConcurrentConnections = maxConcurrentConnections;
 
         options.Listen(
             address,

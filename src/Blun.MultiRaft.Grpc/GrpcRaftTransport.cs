@@ -379,7 +379,16 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
                 httpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact;
             }
 
-            GrpcChannel channel = GrpcChannel.ForAddress(address, new GrpcChannelOptions { HttpClient = httpClient, DisposeHttpClient = true });
+            // MaxReceiveMessageSize matches RaftProtocolServiceExtensions.DefaultMaxReceiveMessageBytes
+            // (SEC-004): an explicit, generous-but-finite ceiling rather than gRPC's implicit 4 MB default.
+            GrpcChannel channel = GrpcChannel.ForAddress(
+                address,
+                new GrpcChannelOptions
+                {
+                    HttpClient = httpClient,
+                    DisposeHttpClient = true,
+                    MaxReceiveMessageSize = RaftProtocolServiceExtensions.DefaultMaxReceiveMessageBytes,
+                });
             var client = new RaftProtocol.RaftProtocolClient(channel);
 
             var callOptions = new CallOptions();

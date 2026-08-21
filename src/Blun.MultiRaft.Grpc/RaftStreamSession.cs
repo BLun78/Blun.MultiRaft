@@ -41,6 +41,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
     private readonly ConcurrentDictionary<ulong, InboundSnapshot> _inboundSnapshots = new();
     private readonly int _maxConcurrentInboundSnapshots;
     private readonly long _maxInboundSnapshotBytes;
+    private readonly SemaphoreSlim _requestFanoutGate;
 
     private long _correlation;
 
@@ -50,6 +51,21 @@ internal sealed class RaftStreamSession : IAsyncDisposable
     /// <summary>Default per-snapshot byte budget (SEC-003): a peer sending past this is rejected, not buffered.</summary>
     public const long DefaultMaxInboundSnapshotBytes = 512L * 1024 * 1024;
 
+    /// <summary>
+    /// Default cap on <see cref="HandleRequestAsync"/> calls in flight at once per session (SEC-004): the
+    /// reader loop starts one uncounted task per inbound request frame so an fsync-bound answer never blocks
+    /// the loop every group on this connection shares, which without a bound lets frames-per-second alone
+    /// grow memory and thread-pool usage without limit.
+    /// </summary>
+    public const int DefaultMaxConcurrentRequests = 1024;
+
+    /// <summary>
+    /// Default capacity of the outbound frame channel (SEC-004). Generous — the goal is a backstop against an
+    /// unbounded queue, not a latency target — but finite: without one, a writer loop slower than its
+    /// producers grows the channel until the process runs out of memory.
+    /// </summary>
+    public const int DefaultOutboundCapacity = 65536;
+
     public RaftStreamSession(
         IAsyncStreamWriter<RaftFrame> writer,
         IAsyncStreamReader<RaftFrame> reader,
@@ -58,7 +74,9 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         ILogger? logger = null,
         NodeId? peerId = null,
         int maxConcurrentInboundSnapshots = DefaultMaxConcurrentInboundSnapshots,
-        long maxInboundSnapshotBytes = DefaultMaxInboundSnapshotBytes)
+        long maxInboundSnapshotBytes = DefaultMaxInboundSnapshotBytes,
+        int maxConcurrentRequests = DefaultMaxConcurrentRequests,
+        int outboundCapacity = DefaultOutboundCapacity)
     {
         _writer = writer;
         _reader = reader;
@@ -67,11 +85,19 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         PeerId = peerId;
         _maxConcurrentInboundSnapshots = maxConcurrentInboundSnapshots;
         _maxInboundSnapshotBytes = maxInboundSnapshotBytes;
+        _requestFanoutGate = new SemaphoreSlim(maxConcurrentRequests, maxConcurrentRequests);
         _shutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _outbound = Channel.CreateUnbounded<RaftFrame>(new UnboundedChannelOptions
+
+        // Bounded with Wait, not Unbounded: a writer loop that falls behind its producers (replies,
+        // outgoing calls) now applies backpressure to whoever is calling SendAsync instead of growing
+        // without limit (SEC-004). SendAsync's callers are CallAsync (a public API call, already
+        // cancellable) and HandleRequestAsync (already gated by _requestFanoutGate below) -- neither is
+        // the reader loop itself, so waiting here cannot stall frame delivery to other groups.
+        _outbound = Channel.CreateBounded<RaftFrame>(new BoundedChannelOptions(outboundCapacity)
         {
             SingleReader = true,
             SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait,
         });
 
         WriterLoop = Task.Run(PumpOutboundAsync, CancellationToken.None);
@@ -360,7 +386,12 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
                     default:
                         // Handled off the read loop: a request may take an fsync to answer, and blocking the
-                        // reader would stall every other group sharing this stream behind it.
+                        // reader would stall every other group sharing this stream behind it. The gate below
+                        // is the SEC-004 backstop: waiting for a free slot *does* block the reader loop, but
+                        // only once DefaultMaxConcurrentRequests answers are already outstanding -- the point
+                        // where an unbounded fan-out would otherwise start growing the thread pool and memory
+                        // without limit. HTTP/2 flow control then carries that backpressure to the sender.
+                        await _requestFanoutGate.WaitAsync(_shutdown.Token).ConfigureAwait(false);
                         _ = HandleRequestAsync(frame);
                         break;
                 }
@@ -436,7 +467,24 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         public bool BudgetExceeded;
     }
 
+    /// <summary>
+    /// Releases the SEC-004 fan-out gate the reader loop acquired before dispatching this frame, then runs
+    /// the actual handler. Split out so every exit path of <see cref="HandleRequestCoreAsync"/> — the early
+    /// <c>return</c>s on a failed identity check included — releases the slot exactly once.
+    /// </summary>
     private async Task HandleRequestAsync(RaftFrame frame)
+    {
+        try
+        {
+            await HandleRequestCoreAsync(frame).ConfigureAwait(false);
+        }
+        finally
+        {
+            _requestFanoutGate.Release();
+        }
+    }
+
+    private async Task HandleRequestCoreAsync(RaftFrame frame)
     {
         var group = new RaftGroupId(frame.GroupId);
         try

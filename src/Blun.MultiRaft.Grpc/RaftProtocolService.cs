@@ -80,6 +80,15 @@ public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
 public static class RaftProtocolServiceExtensions
 {
     /// <summary>
+    /// Explicit receive-size ceiling for the Raft gRPC service (SEC-004): left alone, gRPC's own 4 MB default
+    /// applies, which is a coincidence rather than a decision this library made — an <c>AppendEntries</c>
+    /// frame can legitimately carry <c>RaftGroupOptions.MaxEntriesPerAppend</c> (256 by default) entries, each
+    /// up to <c>SegmentedRaftWalOptions.MaxMessageBytes</c> (1 MB), so a generous, explicit, and still finite
+    /// ceiling replaces an implicit one rather than a tighter one.
+    /// </summary>
+    public const int DefaultMaxReceiveMessageBytes = 64 * 1024 * 1024;
+
+    /// <summary>
     /// Registers the service and the listener it dispatches to. Pass <paramref name="authenticatorFactory"/> to
     /// require every inbound session to authenticate — see SEC-001 in <c>doc/audit</c> for what is at stake
     /// when it is left null.
@@ -87,9 +96,10 @@ public static class RaftProtocolServiceExtensions
     public static IServiceCollection AddRaftProtocol(
         this IServiceCollection services,
         Func<IServiceProvider, IRaftProtocolListener> listenerFactory,
-        Func<IServiceProvider, IRaftPeerAuthenticator>? authenticatorFactory = null)
+        Func<IServiceProvider, IRaftPeerAuthenticator>? authenticatorFactory = null,
+        int maxReceiveMessageBytes = DefaultMaxReceiveMessageBytes)
     {
-        services.AddGrpc();
+        services.AddGrpc(options => options.MaxReceiveMessageSize = maxReceiveMessageBytes);
         services.AddSingleton(listenerFactory);
         if (authenticatorFactory is not null)
         {
