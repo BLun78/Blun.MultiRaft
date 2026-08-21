@@ -259,9 +259,12 @@ public sealed class MessageSizeLimitTests : IDisposable
 
         // A 1024 KB message plus whatever wraps it has to fit, or the cap would reject exactly the payload
         // it was written to allow.
+        int effectiveMaxPayloadBytes = options.MaxPayloadBytes + SegmentedRaftWalOptions.EnvelopeHeadroomBytes;
+
         Assert.Equal(1024 * 1024, SegmentedRaftWalOptions.MaxMessageBytes);
-        Assert.True(options.MaxPayloadBytes > SegmentedRaftWalOptions.MaxMessageBytes);
-        Assert.True(options.SegmentSizeBytes >= options.MaxPayloadBytes);
+        Assert.Equal(SegmentedRaftWalOptions.MaxMessageBytes, options.MaxPayloadBytes);
+        Assert.True(effectiveMaxPayloadBytes > SegmentedRaftWalOptions.MaxMessageBytes);
+        Assert.True(options.SegmentSizeBytes >= effectiveMaxPayloadBytes);
     }
 
     [Fact]
@@ -289,7 +292,7 @@ public sealed class MessageSizeLimitTests : IDisposable
         await using SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory);
 
         var options = new SegmentedRaftWalOptions();
-        byte[] payload = new byte[options.MaxPayloadBytes + 1];
+        byte[] payload = new byte[options.MaxPayloadBytes + SegmentedRaftWalOptions.EnvelopeHeadroomBytes + 1];
         var header = new RaftEntryHeader(1, 1, RaftEntryKind.Command, payload.Length, DateTime.UtcNow.Ticks);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
@@ -364,11 +367,11 @@ public sealed class SegmentedWalRecoveryTests : IDisposable
     private readonly string _directory =
         Path.Combine(Path.GetTempPath(), "blun-mr-rec-" + Guid.CreateVersion7().ToString("N"));
 
-    private SegmentedRaftWalOptions Options => new() { SegmentSizeBytes = 16 * 1024, MaxPayloadBytes = 4096 };
+    private SegmentedRaftWalOptions Options => new() { SegmentSizeBytes = 64 * 1024, MaxPayloadBytes = 4096 };
 
     private static SegmentedRaftWalOptions MappedOptions => new()
     {
-        SegmentSizeBytes = 16 * 1024,
+        SegmentSizeBytes = 32 * 1024,
         MaxPayloadBytes = 4096,
         SegmentAccess = WalSegmentAccess.MemoryMapped,
     };
@@ -564,7 +567,7 @@ public abstract class SegmentedWalWithAlgorithmTests : RaftWalContractTests, IDi
             _directory,
             new SegmentedRaftWalOptions
             {
-                SegmentSizeBytes = 16 * 1024,
+                SegmentSizeBytes = 64 * 1024,
                 MaxPayloadBytes = 4096,
                 ChecksumAlgorithm = Algorithm,
             }))
@@ -579,7 +582,7 @@ public abstract class SegmentedWalWithAlgorithmTests : RaftWalContractTests, IDi
 
         var options = new SegmentedRaftWalOptions
         {
-            SegmentSizeBytes = 16 * 1024,
+            SegmentSizeBytes = 64 * 1024,
             MaxPayloadBytes = 4096,
             ChecksumAlgorithm = Algorithm,
         };
@@ -603,7 +606,7 @@ public abstract class SegmentedWalWithAlgorithmTests : RaftWalContractTests, IDi
     {
         var options = new SegmentedRaftWalOptions
         {
-            SegmentSizeBytes = 16 * 1024,
+            SegmentSizeBytes = 64 * 1024,
             MaxPayloadBytes = 4096,
             ChecksumAlgorithm = Algorithm,
         };
@@ -685,7 +688,7 @@ public sealed class ChecksumAlgorithmMismatchTests : IDisposable
         string groupDir = Path.Combine(_directory, create + "-" + reopen);
         var createOptions = new SegmentedRaftWalOptions
         {
-            SegmentSizeBytes = 16 * 1024,
+            SegmentSizeBytes = 64 * 1024,
             MaxPayloadBytes = 4096,
             ChecksumAlgorithm = create,
         };
@@ -698,7 +701,7 @@ public sealed class ChecksumAlgorithmMismatchTests : IDisposable
 
         var reopenOptions = new SegmentedRaftWalOptions
         {
-            SegmentSizeBytes = 16 * 1024,
+            SegmentSizeBytes = 64 * 1024,
             MaxPayloadBytes = 4096,
             ChecksumAlgorithm = reopen,
         };
@@ -719,7 +722,7 @@ public sealed class ChecksumAlgorithmMismatchTests : IDisposable
         string groupDir = Path.Combine(_directory, "same-" + algorithm);
         var options = new SegmentedRaftWalOptions
         {
-            SegmentSizeBytes = 16 * 1024,
+            SegmentSizeBytes = 64 * 1024,
             MaxPayloadBytes = 4096,
             ChecksumAlgorithm = algorithm,
         };

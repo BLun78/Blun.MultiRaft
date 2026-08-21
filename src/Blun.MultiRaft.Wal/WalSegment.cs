@@ -123,7 +123,7 @@ internal sealed class WalSegment : IDisposable
                 // A corrupt length field must never be trusted into an allocation, so it is bounded by the
                 // same limit the write path enforces before it is used for anything.
                 if (header.PayloadLength < 0
-                    || header.PayloadLength > options.MaxPayloadBytes
+                    || header.PayloadLength > options.EffectiveMaxPayloadBytes
                     || header.Index != expected
                     || header.Term <= 0)
                 {

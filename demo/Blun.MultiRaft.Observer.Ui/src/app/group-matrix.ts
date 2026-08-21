@@ -85,8 +85,8 @@ const FLASH_MS = 2500;
                 <div class="inline-flex items-center gap-1">
                   <select #target
                           [attr.data-testid]="'group-' + group.group + '-select'"
-                          class="rounded border border-neutral-300 bg-transparent px-1.5 py-1 text-xs
-                                 dark:border-neutral-700">
+                          class="rounded border border-neutral-300 bg-white px-1.5 py-1 text-xs text-neutral-900
+                                 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100">
                     <option value="">best placed</option>
                     @for (node of nodes(); track node.id) {
                       <option [value]="node.id">node {{ node.id }}</option>

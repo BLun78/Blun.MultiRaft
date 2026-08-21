@@ -3,6 +3,10 @@
     "playwright": {
       "command": "npx",
       "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "aspire": {
+      "command": "aspire",
+      "args": ["agent", "mcp"]
     }
   }
 }

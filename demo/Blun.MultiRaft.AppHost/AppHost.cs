@@ -53,8 +53,12 @@ foreach ((ulong id, int raftPort, int statusPort) in nodes)
 {
     string resourceName = "raft-node-" + id.ToString(CultureInfo.InvariantCulture);
 
+    // launchProfileName: null suppresses the implicit http/https endpoints Aspire would otherwise derive
+    // from launchSettings.json's applicationUrl. Those endpoints would need a port from ASPNETCORE_URLS,
+    // which is deliberately blanked below -- without this, DCP fails every node with "information about
+    // the port to expose the service is missing; service-producer annotation is invalid".
     IResourceBuilder<ProjectResource> node = builder
-        .AddProject<Projects.Blun_MultiRaft_Node>(resourceName)
+        .AddProject<Projects.Blun_MultiRaft_Node>(resourceName, launchProfileName: null)
         .WithEnvironment("RAFT_NODE_ID", id.ToString(CultureInfo.InvariantCulture))
         .WithEnvironment("RAFT_PORT", raftPort.ToString(CultureInfo.InvariantCulture))
         .WithEnvironment("RAFT_STATUS_PORT", statusPort.ToString(CultureInfo.InvariantCulture))
@@ -88,8 +92,10 @@ builder.Services.AddHostedService<ControlPlaneService>();
 // The observer is an ordinary client of the nodes' /status endpoints -- it is given no privileged access to
 // the cluster, which is the point: everything it shows, anything else could have asked for too. What it
 // cannot do on its own is start and stop processes, so for that it goes back through the control plane.
+// launchProfileName: null for the same reason as the node resources above -- otherwise the "http" endpoint
+// declared below collides with the implicit one Aspire derives from launchSettings.json's applicationUrl.
 builder
-    .AddProject<Projects.Blun_MultiRaft_Observer>("observer")
+    .AddProject<Projects.Blun_MultiRaft_Observer>("observer", launchProfileName: null)
     .WithEnvironment("OBSERVER_PORT", ObserverPort.ToString(CultureInfo.InvariantCulture))
     .WithEnvironment(
         "OBSERVER_CONTROL_PLANE",
