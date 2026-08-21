@@ -2,6 +2,10 @@
 
   <PropertyGroup>
     <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <!-- D-008: the other two src/ libraries set both; this one didn't, so neither analyzer ran here and a
+         RequiresUnreferencedCode violation would not have failed the build the way it does everywhere else. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
     <RootNamespace>Blun.MultiRaft.Grpc</RootNamespace>
