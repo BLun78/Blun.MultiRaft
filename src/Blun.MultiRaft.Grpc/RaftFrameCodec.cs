@@ -207,12 +207,15 @@ internal static class RaftFrameCodec
         => new(new NodeId(message.Node), message.Sequence, message.GroupCount, message.LeaderCount);
 
     public static LeaderTarget ToProto(in LeaderTargetRequest request)
-        => new()
+    {
+        var proto = new LeaderTarget { Execute = request.Execute };
+        if (request.Candidate is { } candidate)
         {
-            Candidate = request.Candidate?.Value ?? 0,
-            HasCandidate = request.Candidate is not null,
-            Execute = request.Execute,
-        };
+            proto.Candidate = candidate.Value;
+        }
+
+        return proto;
+    }
 
     public static LeaderTargetRequest ToDomain(RaftGroupId group, LeaderTarget message)
         => new(group, message.HasCandidate ? new NodeId(message.Candidate) : null, message.Execute);

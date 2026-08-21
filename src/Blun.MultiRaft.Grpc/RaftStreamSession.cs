@@ -219,7 +219,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
                 new RaftFrame
                 {
                     CorrelationId = correlation,
-                    GroupId = request.Group.Value,
+                    GroupId = RaftGroupWireId.ToWire(request.Group),
                     InstallSnapshot = RaftFrameCodec.ToProto(in request),
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -232,7 +232,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
                     new RaftFrame
                     {
                         CorrelationId = correlation,
-                        GroupId = request.Group.Value,
+                        GroupId = RaftGroupWireId.ToWire(request.Group),
 
                         // Copied, not wrapped, for the reason set out on RaftFrameCodec: SendAsync only queues
                         // the frame, and FileRaftSnapshotStore.ReadAsync refills one chunk array per iteration,
@@ -252,7 +252,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
                 new RaftFrame
                 {
                     CorrelationId = correlation,
-                    GroupId = request.Group.Value,
+                    GroupId = RaftGroupWireId.ToWire(request.Group),
                     SnapshotChunk = new SnapshotChunk { Last = true },
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -315,7 +315,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
         try
         {
-            var frame = new RaftFrame { CorrelationId = correlation, GroupId = group.Value };
+            var frame = new RaftFrame { CorrelationId = correlation, GroupId = RaftGroupWireId.ToWire(group) };
             fill(frame);
             await SendAsync(frame, cancellationToken).ConfigureAwait(false);
             return await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -452,7 +452,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
             tracked.Channel.Writer.TryComplete(
                 new InvalidOperationException($"Inbound snapshot exceeded the {_maxInboundSnapshotBytes}-byte budget."));
             _inboundSnapshots.TryRemove(frame.CorrelationId, out _);
-            GrpcLog.SnapshotBudgetExceeded(_logger, frame.GroupId, _maxInboundSnapshotBytes);
+            GrpcLog.SnapshotBudgetExceeded(_logger, RaftGroupWireId.FromWire(frame.GroupId).Value, _maxInboundSnapshotBytes);
             return;
         }
 
@@ -486,7 +486,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
     private async Task HandleRequestCoreAsync(RaftFrame frame)
     {
-        var group = new RaftGroupId(frame.GroupId);
+        var group = RaftGroupWireId.FromWire(frame.GroupId);
         try
         {
             RaftFrame response = new() { CorrelationId = frame.CorrelationId, GroupId = frame.GroupId };
@@ -647,7 +647,7 @@ internal sealed class RaftStreamSession : IAsyncDisposable
             // exactly that for a non-contiguous append — and a follower failing this way simply answers
             // nothing, so the leader sees a timeout and retries forever. Swallowing that without a word made
             // a whole class of follower-side failure invisible from both ends of the wire.
-            GrpcLog.RequestFailed(_logger, ex, frame.GroupId, frame.PayloadCase.ToString());
+            GrpcLog.RequestFailed(_logger, ex, RaftGroupWireId.FromWire(frame.GroupId).Value, frame.PayloadCase.ToString());
         }
     }
 
