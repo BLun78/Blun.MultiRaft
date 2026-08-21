@@ -78,9 +78,28 @@ app.MapPost("/api/resources/{name}/{command}", async (
     ObserverOptions settings,
     CancellationToken token) =>
 {
+    // SEC-009: name and command are route values, already URL-decoded by the time they get here, and were
+    // being interpolated straight into the proxied URI unencoded and unchecked -- an encoded '/' or a '?'/'#'
+    // in either could redirect the request to a different control-plane path or inject query/fragment data.
+    // The control plane's own Resolve(name) and command switch already reject anything unexpected, but that
+    // is a coupling nothing here made visible; checking both at the door the traffic actually enters through
+    // makes the assumption obvious and removes any dependence on the far side getting it right.
+    if (settings.Nodes.All(n => n.ResourceName != name))
+    {
+        return Results.NotFound();
+    }
+
+    if (command is not ("start" or "stop" or "restart"))
+    {
+        return Results.BadRequest($"Unknown command '{command}'.");
+    }
+
     using HttpResponseMessage response = await clients
         .CreateClient("node")
-        .PostAsync(new Uri(settings.ControlPlane, $"/api/resources/{name}/{command}"), null, token)
+        .PostAsync(
+            new Uri(settings.ControlPlane, $"/api/resources/{Uri.EscapeDataString(name)}/{Uri.EscapeDataString(command)}"),
+            null,
+            token)
         .ConfigureAwait(false);
 
     if (!response.IsSuccessStatusCode)
