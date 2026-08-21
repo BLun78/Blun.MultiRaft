@@ -27,12 +27,19 @@ komprimiert über gRPC repliziert werden — ohne dass WAL oder gRPC-Transport d
   komprimierte oder verschlüsselte Message-Bodies) unnötig Zeit gekostet. `L00_FAST`s eigener Overhead ist
   dabei klein genug (schlechtester gemessener Fall: ~13% bei 1 MiB/Random), dass der Versuch selbst bei
   jedem Append vertretbar ist.
-- **`LZ4Frame`, nicht `LZ4Stream` oder `LZ4Pickler`.** Einziges konsistentes Ergebnis über die gesamte
-  Matrix: `Stream` allokiert bei jeder Größe **~1,5× so viel wie `Frame`** (Grund: `MemoryStream.ToArray()`
-  kopiert intern noch einmal). Zeitlich ein Unentschieden, aber bei potenziell zehntausenden Gruppen mit
-  kontinuierlicher Append-Last (siehe CLAUDE.md, "ten-thousand-group scale") ist weniger GC-Druck der
-  Tiebreaker. `Pickler` wurde in dieser Runde nicht gegen `Frame` gemessen (siehe Benchmark-Doku), scheidet
-  aber ohnehin aus, weil `Frame` das für Append benötigte Span-zu-Span-Verhalten ohne Zwischenkopie bietet.
+- **Roher LZ4-Block-Codec mit eigenem 4-Byte-Längenpräfix — nicht das Frame-Format.** Ursprünglich war
+  `LZ4Frame` vorgesehen (`Stream` allokiert bei jeder Größe ~1,5× so viel wie `Frame`, weil
+  `MemoryStream.ToArray()` intern noch einmal kopiert; zeitlich Unentschieden). **Bei der Umsetzung stellte
+  sich heraus, dass das nicht trägt:** `LZ4EncoderSettings.ContentLength` — genau das Feld, das den Decoder
+  seinen Zielpuffer exakt dimensionieren lassen würde — ist für Span-Ziele in K4os schlicht nicht
+  implementiert und wirft `NotImplementedException` aus `ByteSpanLZ4FrameWriter`. Damit verliert das
+  Frame-Format seinen einzigen hier nutzbaren Vorteil. Der übrige Nutzen (Selbstbeschreibung, Magic Number,
+  Checksums) ist in diesem Kontext wertlos: `RaftEntryHeader.Compression` sagt bereits, ob ein Eintrag
+  komprimiert ist, das WAL hat seine eigene Prüfsumme, und beide Enden sind dieselbe Bibliotheksversion.
+  `LZ4Codec.Encode`/`Decode` mit vorangestellter Originallänge kostet 4 Byte statt Frame-Header plus
+  End-Mark, dekomprimiert in einem einzigen Aufruf in einen exakt dimensionierten Puffer und behält das
+  Allokationsprofil (ein gepoolter Puffer). Damit wird auch nur das Basispaket `K4os.Compression.LZ4`
+  gebraucht, nicht `.Streams`.
 - **Feature bleibt drin, trotz durchschnittlich ~1 KB Payload-Größe.** Im für euch typischen Bereich
   (2 KB–16 KB) zeigte der Benchmark kein klares Signal (Unterschiede im Bereich des Messrauschens) — das
   Feature schadet dort also nicht, hilft aber auch nicht spürbar. Der klare Nutzen (bis zu ~50% kleinere
@@ -63,10 +70,11 @@ gespeicherten (ggf. komprimierten) Bytes — unverändert gegenüber dem ursprü
 
 ### 3. NuGet-Abhängigkeiten
 
-`K4os.Compression.LZ4.Streams` (für die `LZ4Frame`-API) zu `src/Blun.MultiRaft` (Core) hinzufügen — nicht
-zu `Blun.MultiRaft.Wal`, das bleibt storage-only und referenziert keine Kompressionslogik. Zentral in
-`Directory.Packages.props` versionieren (bereits als `1.3.8` im Benchmark-Projekt gepinnt, dieselbe Version
-für Core übernehmen).
+`K4os.Compression.LZ4` (Basispaket, enthält `LZ4Codec` und `PinnedMemory`) zu `src/Blun.MultiRaft` (Core)
+hinzufügen — nicht zu `Blun.MultiRaft.Wal`, das bleibt storage-only und referenziert keine
+Kompressionslogik. `.Streams` wird **nicht** gebraucht (siehe Block-Codec-Begründung oben); das
+Benchmark-Projekt referenziert es weiterhin, weil es die Frame-APIs mitmisst. Zentral in
+`Directory.Packages.props` auf `1.3.8` gepinnt.
 
 ### 4. `RaftGroupOptions`: `PayloadCompression`-Schalter (Enum, nicht Bool)
 
@@ -90,61 +98,85 @@ nur an zwei verschiedenen Punkten im Datenfluss (Konfigurationsabsicht vs. tats�
 
 ### 5. Kompression: adaptiv in `RaftGroupInstance.AppendAsync`
 
-Vor dem WAL-Append, wenn `PayloadCompression != RaftPayloadCompression.None`:
+Implementiert in `RaftPayloadCodec.Compress` (`src/Blun.MultiRaft/Core/RaftPayloadCodec.cs`), aufgerufen aus
+`AppendCoreAsync` vor dem WAL-Append:
 
-1. `LZ4Frame.Encode(payload.Span, buffer.Span, LZ4Level.L00_FAST, extraMemory: 0)` in einen Puffer der
-   Größe `LZ4Codec.MaximumOutputSize(payload.Length) + 64` (Frame-Header/Footer-Marge, siehe
-   `CompressWithFrame` im Benchmark-Code als Referenzimplementierung,
-   `benchmark/Blun.MultiRaft.Benchmarks/CompressionLevelBenchmarks.cs`).
-2. **Encoder muss `LZ4EncoderSettings.ContentLength = payload.Length` setzen.** Ohne das ist die
-   Originallänge beim Decode nicht direkt aus dem Frame-Descriptor lesbar (`ILZ4FrameReader.GetFrameLength()`
-   liefert dann `null`), und der Decoder müsste in einer wachsenden Puffer-Schleife lesen statt den
-   Zielpuffer exakt vorzudimensionieren. Das war im Benchmark irrelevant (dort wurde nie dekomprimiert),
-   ist hier aber ein echter Korrektheits-/Effizienzpunkt.
-3. Ist das Ergebnis kürzer als `payload.Length`: `Header.Compression = Lz4Fast`, komprimierte Bytes ins WAL.
-   Sonst: `Header.Compression = None`, Original-Payload unverändert ins WAL (wie heute).
+1. Übersprungen, wenn `PayloadCompression == None`, wenn der Eintrag kein `RaftEntryKind.Command` ist, oder
+   wenn das Payload leer ist. **`Membership` bleibt ausdrücklich unkomprimiert** — nicht nur "klein und
+   selten", sondern zwingend: der Replay, der beim Start die Konfiguration rekonstruiert, liest diese
+   Einträge direkt aus dem Log, bevor überhaupt eine State Machine existiert, die dekomprimieren könnte.
+2. `LZ4Codec.Encode(payload.Span, buffer.AsSpan(4), LZ4Level.L00_FAST)` in einen aus `ArrayPool<byte>`
+   geliehenen Puffer der Größe `4 + LZ4Codec.MaximumOutputSize(payload.Length)`; die Originallänge kommt als
+   Little-Endian-`int` in die ersten 4 Byte.
+3. Nur behalten, wenn `4 + written < payload.Length` — das Präfix zählt mit. Dann
+   `Header.Compression = Lz4Fast`; sonst `Header.Compression = None` und das unveränderte Original ins WAL.
+4. Der geliehene Puffer wird als `out byte[]? rented` an den Aufrufer zurückgegeben, der ihn nach dem Append
+   in einem `finally` zurückgibt — er muss über den `Compress`-Aufruf hinaus gültig bleiben.
 
 ### 6. Dekompression: einmalig in `IRaftStateMachine.ApplyAsync`-Auslieferung
 
-Wenn `entry.Header.Compression == Lz4Fast`: Zielpuffer über `reader.GetFrameLength()` (dank gesetztem
-`ContentLength`, siehe Schritt 5.2) exakt dimensionieren, `LZ4Frame.Decode(entry.Payload, extraMemory: 0)`
-öffnen, per `ReadManyBytes` befüllen. Ergebnis ist ein neuer, eigener Array — respektiert automatisch die
-Buffer-Lifetime-Regel aus CLAUDE.md (recycelter Puffer darf nicht über die Auslieferung hinaus gehalten
-werden), weil das ohnehin ein frisches Array ist, keine Slice des recycelten Puffers.
+`RaftPayloadCodec.Expand`, aufgerufen in der Apply-Schleife: bei `Compression == Lz4Fast` die Originallänge
+aus dem 4-Byte-Präfix lesen, ein Array dieser Größe anlegen, `LZ4Codec.Decode` in einem Aufruf hineinschreiben
+und die dekodierte Länge gegen die deklarierte prüfen (`InvalidOperationException` bei Abweichung — ein
+Integritätsproblem, kein Transportfehler, siehe die Exception-Konvention in CLAUDE.md). Das Ergebnis ist ein
+frisches Array, kein Slice des recycelten WAL-Puffers, und erfüllt damit die Buffer-Lifetime-Regel
+automatisch.
 
 ### 7. Pinned-Memory-Sizing für K4os
 
 `PinnedMemory.MaxPooledSize = Mem.M1 + 128` (1 MiB + 128 Byte) statt K4os-Default oder komplett
-deaktiviertem Pooling setzen — deckt das 1024-KB-Message-Cap der Bibliothek plus Marge für
-Frame-Format-Overhead ab, ohne für den Normalfall (~1 KB) über-zu-dimensionieren. Begründung: `Blun.MultiRaft`
-ist ein Dauerbetrieb-Prozess (`MultiRaftHost`), nicht das kurzlebige "in-and-out"-Szenario, für das K4os'
-eigenes Pinning-Pooling-Default gedacht ist — Pinned Memory blockiert GC-Kompaktierung, was sich über Tage/
-Wochen mit tausenden Gruppen zu Fragmentierung summieren kann. Diese Einstellung beim Start setzen
-(z.B. in `MultiRaftHost`-Initialisierung oder wo die Library sonst einmalig konfiguriert wird).
+deaktiviertem Pooling — deckt das 1024-KB-Message-Cap der Bibliothek plus Marge ab, ohne für den Normalfall
+(~1 KB) über-zu-dimensionieren. Begründung: `Blun.MultiRaft` ist ein Dauerbetrieb-Prozess, nicht das
+kurzlebige "in-and-out"-Szenario, für das K4os' Pinning-Pooling-Default gedacht ist — Pinned Memory blockiert
+GC-Kompaktierung, was sich über Tage/Wochen mit tausenden Gruppen zu Fragmentierung summieren kann.
+
+Gesetzt im **statischen Konstruktor von `RaftPayloadCodec`**, nicht in `MultiRaftHost`: so greift es auch,
+wenn eine `RaftGroupInstance` direkt ohne Host benutzt wird, und erst dann, wenn tatsächlich etwas
+komprimiert wird. Die Einstellung ist prozessglobal — das ist eine bewusste Nebenwirkung, im Code als solche
+kommentiert.
+
+### 8. gRPC: `Compression` muss über die Leitung — nicht im ursprünglichen Entwurf, aber zwingend
+
+Der Entwurf ging davon aus, der gRPC-Transport bleibe unverändert, weil er Payloads "nur durchreicht". Das
+stimmt für das Payload, **nicht für den Header**: `RaftFrameCodec.ToProto`/`ToDomain` baut die Header-Felder
+einzeln auf, und was dort nicht steht, existiert für den Empfänger nicht. Ohne `compression` im Proto
+speichert ein Follower die komprimierten Bytes mit `Compression = None` und reicht beim Apply einen
+LZ4-Block an seine State Machine, als wäre er das Kommando.
+
+Das ist genau die Fehlerklasse aus `doc/open-issue-seed-visibility.md` und den Remarks in `RaftFrameCodec`:
+Term, Index und Prüfsumme stimmen alle, die Konsistenzprüfung besteht, **nur der Inhalt ist falsch** — und
+für keinen Test über `InMemoryRaftTransport` sichtbar, weil der Header dort per Wert kopiert wird und das
+Flag ohnehin trägt. Deshalb:
+
+- `uint32 compression = 7;` in `message LogEntry` (`Protos/raft.proto`).
+- `ToProto` schreibt es, `ToDomain` liest es — und lehnt unbekannte Werte mit
+  `InvalidOperationException` ab, statt sie zu truncaten (dieselbe Begründung wie beim bestehenden
+  `Kind`-Check: ein Schema, das dieser Knoten nicht dekodieren kann, ist ein Protokoll-Mismatch).
+- Abgedeckt durch `GrpcTransportTests.CompressionFlagSurvivesTheWireRoundTrip`, dem Gegenstück zum schon
+  vorhandenen `ApplicationTagSurvivesTheWireRoundTrip`.
 
 ## Nicht im Scope dieser Änderung
 
 - Snapshot-Pfad (`CaptureAsync`/`RestoreAsync`) — andere Kostenfunktion (einmalige Größe statt
   Append-Latenz), eigene Entscheidung wert.
-- `RaftEntryKind.Membership`-Einträge — bleiben unkomprimiert, sind klein und selten.
-- gRPC-Transport — unverändert, da er `RaftLogEntry.Payload` ohnehin nur durchreicht; Kompression läuft
-  bereits vor dem Transport, sodass das Frame automatisch komprimiert repliziert wird.
+- `RaftEntryKind.Membership`-Einträge — bleiben unkomprimiert (siehe Schritt 5.1: der Konfigurations-Replay
+  beim Start liest sie ohne State Machine).
 
 ## Tests
 
-- Roundtrip: `Compress → WAL-Append → Read → Decompress` liefert das Original-Payload bit-identisch, für
-  beide Inhaltstypen (zufällig, wiederholend) und mehrere Größen (klein, wo `None` gewinnt; groß, wo
-  `Lz4Fast` gewinnt).
-- Adaptiver Fallback: ein Payload, für den `LZ4Frame.Encode` kein kleineres Ergebnis liefert (z.B.
-  vorkomprimierte/zufällige Bytes knapp über der Kompressionsschwelle), landet mit `Compression = None`
-  bit-identisch im WAL — nicht mit einem größeren komprimierten Blob.
-- `PayloadCompression = RaftPayloadCompression.None` (Default) verhält sich exakt wie vor dieser Änderung — Regressionstest gegen
-  bestehende `WalTests.cs`/`RaftGroupInstance`-Tests.
-- Contract-Test-Erweiterung in `WalTests.cs`, falls dort der Header direkt geprüft wird (`Compression`-Feld
-  muss für bestehende Tests weiterhin `None` sein).
+Alle in `test/Blun.MultiRaft.Tests/PayloadCompressionTests.cs`, bis auf den Wire-Test:
+
+- `ACompressedPayloadReachesTheStateMachineByteForByte` (64 B / 4 KB / 256 KB) — prüft **jede Replik**, nicht
+  nur den Leader: der Follower speichert, was er bekommt, und dekomprimiert selbst.
+- `AnIncompressiblePayloadIsStoredUncompressedAndStillArrivesIntact` — Zufallsbytes landen mit
+  `Compression = None` und Originallänge im Log, nicht als größerer Blob.
+- `ACompressiblePayloadIsActuallySmallerOnDisk` — die gespeicherte Länge ist tatsächlich kleiner.
+- `CompressionIsOffByDefaultAndLeavesTheEntryUntouched` — Default-Verhalten unverändert.
+- `MembershipEntriesAreNeverCompressed` — auch bei eingeschalteter Kompression.
+- `GrpcTransportTests.CompressionFlagSurvivesTheWireRoundTrip` — siehe Schritt 8.
 
 ## Referenzen
 
 - Messdaten und Rohbegründung: `doc/compression-level-benchmark.md`.
-- Referenzimplementierung der Kompressions-APIs (Stream/Frame/Pickler) als Benchmark-Code:
-  `benchmark/Blun.MultiRaft.Benchmarks/CompressionLevelBenchmarks.cs` (`CompressionHelpers.CompressWithFrame`).
+- Benchmark-Code der verglichenen Kompressions-APIs:
+  `benchmark/Blun.MultiRaft.Benchmarks/CompressionLevelBenchmarks.cs`.

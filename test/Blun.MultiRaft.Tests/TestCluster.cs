@@ -26,6 +26,12 @@ internal sealed class TestCluster : IAsyncDisposable
 
     public Dictionary<NodeId, InMemoryRaftSnapshotStore> Snapshots { get; } = [];
 
+    /// <summary>
+    /// The log factories, so a test can reopen a group's log and read back what was actually stored — the
+    /// factory hands out the same instance for a group, so this is the very log the group is writing to.
+    /// </summary>
+    public Dictionary<NodeId, InMemoryRaftWalFactory> Logs { get; } = [];
+
     public static RaftGroupOptions FastOptions => new()
     {
         ElectionTimeout = TimeSpan.FromMilliseconds(120),
@@ -54,7 +60,7 @@ internal sealed class TestCluster : IAsyncDisposable
             IRaftProtocolTransport transport = _network.Connect(node, new LazyListener(() => host));
             host = new MultiRaftHost(
                 node,
-                new InMemoryRaftWalFactory(),
+                Logs[node] = new InMemoryRaftWalFactory(),
                 new InMemoryRaftMetaStore(),
                 transport,
                 Snapshots[node] = new InMemoryRaftSnapshotStore(),

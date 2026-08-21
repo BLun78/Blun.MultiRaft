@@ -1145,14 +1145,42 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
 
             term = _currentTerm;
             index = _wal.LastIndex + 1;
-            var header = new RaftEntryHeader(term, index, kind, payload.Length, _time.GetUtcNow().UtcTicks, applicationTag);
-            await _wal.AppendAsync(header, payload, cancellationToken).ConfigureAwait(false);
+
+            ReadOnlyMemory<byte> stored = RaftPayloadCodec.Compress(
+                payload,
+                kind,
+                _options.PayloadCompression,
+                out RaftPayloadCompression compression,
+                out byte[]? rented);
+
+            try
+            {
+                var header = new RaftEntryHeader(
+                    term,
+                    index,
+                    kind,
+                    stored.Length,
+                    _time.GetUtcNow().UtcTicks,
+                    applicationTag,
+                    compression);
+
+                await _wal.AppendAsync(header, stored, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (rented is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
+            }
+
             Volatile.Write(ref _lastAppendActivity, _time.GetTimestamp());
 
             if (kind == RaftEntryKind.Membership)
             {
                 // A configuration takes effect when appended, not when committed (Raft §4.1). Deferring it to
                 // commit is the classic way to end up counting a removed node in the quorum that removes it.
+                // Reads the caller's payload, not `stored` — membership entries are never compressed.
                 ApplyMembership(MembershipChange.Read(payload.Span));
             }
         }
@@ -2019,7 +2047,8 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     if (entry.Kind == RaftEntryKind.Command)
                     {
-                        await _stateMachine.ApplyAsync(Group, entry, _shutdown.Token).ConfigureAwait(false);
+                        RaftLogEntry delivered = RaftPayloadCodec.Expand(in entry);
+                        await _stateMachine.ApplyAsync(Group, delivered, _shutdown.Token).ConfigureAwait(false);
                     }
 
                     Volatile.Write(ref _lastApplied, entry.Index);

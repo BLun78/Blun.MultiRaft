@@ -23,6 +23,23 @@ public enum RaftEntryKind : byte
 }
 
 /// <summary>
+/// Whether an entry's payload is LZ4-compressed on the wire and on disk. Deliberately only two values —
+/// see <c>doc/raft-payload-compression.md</c>: every LZ4 level above the fastest one measured worse than no
+/// compression at all on the append+flush path, so there is no level to choose between, only on/off. Used
+/// both as <see cref="RaftEntryHeader.Compression"/> (the actual outcome for one entry, decided per append
+/// by trying compression and keeping it only if smaller) and as the value of a group's
+/// <c>RaftGroupOptions.PayloadCompression</c> switch (the configured intent).
+/// </summary>
+public enum RaftPayloadCompression : byte
+{
+    /// <summary>Payload is stored/sent as-is.</summary>
+    None = 0,
+
+    /// <summary>Payload is LZ4-frame-compressed at <c>LZ4Level.L00_FAST</c>.</summary>
+    Lz4Fast = 1,
+}
+
+/// <summary>
 /// Fixed-size, blittable record header. Laid out explicitly at 32 bytes so it can be written to and read
 /// from the WAL with <see cref="MemoryMarshal"/> — no serializer, no intermediate buffer, and the payload
 /// can follow it as a second span in the same scatter-gather write.
@@ -49,8 +66,15 @@ public readonly struct RaftEntryHeader : IEquatable<RaftEntryHeader>
     /// </summary>
     public readonly byte ApplicationTag;
 
+    /// <summary>
+    /// How <see cref="RaftLogEntry.Payload"/> is encoded. Decided per entry at append time, not per group:
+    /// a group with compression switched on still writes <see cref="RaftPayloadCompression.None"/> for any
+    /// payload that did not actually get smaller. <see cref="PayloadLength"/> is always the length of what
+    /// is stored, compressed or not.
+    /// </summary>
+    public readonly RaftPayloadCompression Compression;
+
     private readonly byte _reserved1;
-    private readonly byte _reserved2;
 
     public RaftEntryHeader(
         long term,
@@ -58,7 +82,8 @@ public readonly struct RaftEntryHeader : IEquatable<RaftEntryHeader>
         RaftEntryKind kind,
         int payloadLength,
         long timestampTicks,
-        byte applicationTag = 0)
+        byte applicationTag = 0,
+        RaftPayloadCompression compression = RaftPayloadCompression.None)
     {
         Term = term;
         Index = index;
@@ -66,7 +91,8 @@ public readonly struct RaftEntryHeader : IEquatable<RaftEntryHeader>
         PayloadLength = payloadLength;
         Kind = kind;
         ApplicationTag = applicationTag;
-        _reserved1 = _reserved2 = 0;
+        Compression = compression;
+        _reserved1 = 0;
     }
 
     /// <summary>
@@ -89,11 +115,12 @@ public readonly struct RaftEntryHeader : IEquatable<RaftEntryHeader>
     public bool Equals(RaftEntryHeader other)
         => Term == other.Term && Index == other.Index && Kind == other.Kind
            && PayloadLength == other.PayloadLength && TimestampTicks == other.TimestampTicks
-           && ApplicationTag == other.ApplicationTag;
+           && ApplicationTag == other.ApplicationTag && Compression == other.Compression;
 
     public override bool Equals(object? obj) => obj is RaftEntryHeader other && Equals(other);
 
-    public override int GetHashCode() => HashCode.Combine(Term, Index, (byte)Kind, PayloadLength, ApplicationTag);
+    public override int GetHashCode()
+        => HashCode.Combine(Term, Index, (byte)Kind, PayloadLength, ApplicationTag, (byte)Compression);
 
     public static bool operator ==(RaftEntryHeader left, RaftEntryHeader right) => left.Equals(right);
 
