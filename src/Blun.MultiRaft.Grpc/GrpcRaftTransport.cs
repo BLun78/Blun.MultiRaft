@@ -5,14 +5,17 @@
 // for the full license text.
 
 using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using Blun.MultiRaft.Grpc.Compression;
 using Blun.MultiRaft.Grpc.Protocol;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Microsoft.Extensions.Logging;
+using GzipCompressionProvider = Grpc.Net.Compression.GzipCompressionProvider;
 
 namespace Blun.MultiRaft.Grpc;
 
@@ -52,6 +55,41 @@ public sealed class GrpcRaftTransportOptions
     /// ahead of this library's own token. See <see cref="RaftUserAgent.ForApplication"/>.
     /// </summary>
     public string? UserAgent { get; init; }
+
+    /// <summary>
+    /// Compression applied to this node's outbound requests. Response compression is negotiated separately,
+    /// via the peer's configured algorithm and the accept-encoding implied by <see cref="CompressionLevel"/>'s
+    /// providers below. Matches <c>Blun.Mq.Client.MqClientOptions.Compression</c>.
+    /// </summary>
+    public RaftGrpcCompression Compression { get; init; } = RaftGrpcCompression.None;
+
+    /// <summary>Compression effort for both directions. Only relevant when <see cref="Compression"/> is set.</summary>
+    public CompressionLevel CompressionLevel { get; init; } = CompressionLevel.Fastest;
+
+    /// <summary>
+    /// See <c>SocketsHttpHandler.EnableMultipleHttp2Connections</c>: past a peer's advertised concurrent-stream
+    /// limit, a second physical connection opens instead of queuing new streams behind ones already in flight.
+    /// </summary>
+    public bool EnableMultipleHttp2Connections { get; init; } = true;
+
+    /// <summary>See <c>SocketsHttpHandler.EnableMultipleHttp3Connections</c>; only relevant under <see cref="RaftGrpcProtocol.Http3"/>.</summary>
+    public bool EnableMultipleHttp3Connections { get; init; } = true;
+
+    /// <summary>
+    /// Interval between keep-alive pings on an otherwise-idle connection. A group's tick loop is normally
+    /// enough traffic on its own, but a quiet cluster (a drained queue, an idle group) can otherwise sit
+    /// silent long enough for the transport to reclaim the connection out from under it.
+    /// </summary>
+    public TimeSpan KeepAlivePingDelay { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>How long a keep-alive ping may go unanswered before the connection is considered dead.</summary>
+    public TimeSpan KeepAlivePingTimeout { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Skips server-certificate validation entirely. Off by default; only meant for local/dev clusters
+    /// running self-signed certificates. Matches <c>Blun.Mq.Client.MqClientOptions.AllowUntrustedServerCertificate</c>.
+    /// </summary>
+    public bool AllowUntrustedServerCertificate { get; init; }
 }
 
 /// <summary>
@@ -263,15 +301,7 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
         }
 
         PeerConnection connection = await PeerConnection
-            .OpenAsync(
-                address,
-                _options.Protocol,
-                _listener,
-                _options.Logger,
-                _options.LocalNode,
-                _options.Authenticator,
-                _options.UserAgent,
-                cancellationToken)
+            .OpenAsync(address, _options, _listener, cancellationToken)
             .ConfigureAwait(false);
 
         // A concurrent caller may have won the race; keep whichever landed first and discard the loser
@@ -337,30 +367,42 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
 
         public static async ValueTask<PeerConnection> OpenAsync(
             Uri address,
-            RaftGrpcProtocol protocol,
+            GrpcRaftTransportOptions options,
             IRaftProtocolListener listener,
-            ILogger? logger,
-            NodeId localNode,
-            IRaftPeerAuthenticator? authenticator,
-            string? userAgent,
             CancellationToken cancellationToken)
         {
-            // EnableMultipleHttp2Connections is the client-side half of "the 101st stream still works": if
+            // EnableMultipleHttp2/3Connections is the client-side half of "the 101st stream still works": if
             // this channel's single connection to a peer ever hits that peer's advertised concurrent-stream
             // limit, SocketsHttpHandler opens a second physical connection instead of queuing new streams
-            // behind the ones already in flight. Set unconditionally -- it does nothing under HTTP/3, which
-            // has no per-connection stream ceiling to begin with, and costs nothing when the limit is never
-            // approached, which is the common case since this transport normally holds one stream per peer.
+            // behind the ones already in flight. Costs nothing when the limit is never approached, which is
+            // the common case since this transport normally holds one stream per peer.
             var handler = new SocketsHttpHandler
             {
                 PreAuthenticate = true,
                 AllowAutoRedirect = false,
-                MaxConnectionsPerServer = 10000,    
-                EnableMultipleHttp2Connections = true,
-                EnableMultipleHttp3Connections = true,
+                MaxConnectionsPerServer = 10000,
+                EnableMultipleHttp2Connections = options.EnableMultipleHttp2Connections,
+                EnableMultipleHttp3Connections = options.EnableMultipleHttp3Connections,
 
+                // Without this an idle connection is torn down after ~60s. A group between elections, or one
+                // behind a drained queue, can sit quiet for minutes with its peer stream still open -- the
+                // transport cannot tell that apart from an abandoned connection, so pings keep traffic on the
+                // wire and stop it reclaiming the connection out from under a live session.
+                KeepAlivePingDelay = options.KeepAlivePingDelay,
+                KeepAlivePingTimeout = options.KeepAlivePingTimeout,
                 KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+
+                // The pings above keep an *established* connection alive; this stops the pool retiring the
+                // connection underneath them on its own idle schedule.
+                PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
             };
+
+            if (options.AllowUntrustedServerCertificate)
+            {
+                // Off by default -- see GrpcRaftTransportOptions.AllowUntrustedServerCertificate. Only the
+                // validation callback is replaced; everything else keeps SocketsHttpHandler's own defaults.
+                handler.SslOptions.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
+            }
 
             // UserAgentHandler sits between the socket handler and the HttpClient so it can rewrite the
             // request's User-Agent header after grpc-dotnet has already set its own token on it -- see
@@ -368,13 +410,13 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
             // DefaultVersionPolicy still have to live on HttpClient, not on either handler, and only one of
             // GrpcChannelOptions.HttpClient/.HttpHandler may be set, which is why the chain is wrapped into a
             // single HttpClient rather than passed as HttpHandler directly.
-            var userAgentHandler = new UserAgentHandler(RaftUserAgent.ForApplication(userAgent)) { InnerHandler = handler };
+            var userAgentHandler = new UserAgentHandler(RaftUserAgent.ForApplication(options.UserAgent)) { InnerHandler = handler };
 
             // Disposing the channel disposes this client, which disposes userAgentHandler, which disposes the
             // socket handler in turn.
             var httpClient = new HttpClient(userAgentHandler);
 
-            if (protocol == RaftGrpcProtocol.Http3)
+            if (options.Protocol == RaftGrpcProtocol.Http3)
             {
                 // No cleartext mode exists for QUIC -- forcing the exact version rather than negotiating
                 // means a peer that can't speak HTTP/3 fails the connection outright instead of silently
@@ -390,6 +432,8 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
 
             // MaxReceiveMessageSize matches RaftProtocolServiceExtensions.DefaultMaxReceiveMessageBytes
             // (SEC-004): an explicit, generous-but-finite ceiling rather than gRPC's implicit 4 MB default.
+            // CompressionProviders determines the grpc-accept-encoding this node advertises, and therefore
+            // what a peer is allowed to compress its responses with.
             GrpcChannel channel = GrpcChannel.ForAddress(
                 address,
                 new GrpcChannelOptions
@@ -397,26 +441,51 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
                     HttpClient = httpClient,
                     DisposeHttpClient = true,
                     MaxReceiveMessageSize = RaftProtocolServiceExtensions.DefaultMaxReceiveMessageBytes,
+                    CompressionProviders =
+                    [
+#if NET11_0_OR_GREATER
+                        new ZstandardCompressionProvider(options.CompressionLevel),
+#endif
+                        new BrotliCompressionProvider(options.CompressionLevel),
+                        new GzipCompressionProvider(options.CompressionLevel),
+                    ],
                 });
             var client = new RaftProtocol.RaftProtocolClient(channel);
 
-            var callOptions = new CallOptions();
-            if (authenticator is not null)
+            var metadata = new Metadata();
+            if (options.Authenticator is not null)
             {
                 // Built before the call opens: a session with no valid header is exactly the SEC-001 gap this
                 // authenticator exists to close, so there is no "connect first, authenticate later" path here.
-                string header = await authenticator.CreateHeaderAsync(localNode, cancellationToken).ConfigureAwait(false);
-                var metadata = new Metadata { { "x-raft-auth", header } };
-                callOptions = callOptions.WithHeaders(metadata);
+                string header = await options.Authenticator.CreateHeaderAsync(options.LocalNode, cancellationToken).ConfigureAwait(false);
+                metadata.Add("x-raft-auth", header);
             }
 
+            // Opts this call's *requests* into compression. Responses are negotiated separately, via the
+            // peer's configured algorithm and the accept-encoding implied by CompressionProviders above.
+            string? requestEncoding = options.Compression switch
+            {
+#if NET11_0_OR_GREATER
+                RaftGrpcCompression.Zstd => GrpcCompressionAlgorithms.Zstd,
+#endif
+                RaftGrpcCompression.Brotli => GrpcCompressionAlgorithms.Brotli,
+                RaftGrpcCompression.GZip => GrpcCompressionAlgorithms.GZip,
+                _ => null,
+            };
+
+            if (requestEncoding is not null)
+            {
+                metadata.Add("grpc-internal-encoding-request", requestEncoding);
+            }
+
+            var callOptions = new CallOptions().WithHeaders(metadata);
             AsyncDuplexStreamingCall<RaftFrame, RaftFrame> call = client.Session(callOptions);
             var session = new RaftStreamSession(
                 call.RequestStream,
                 call.ResponseStream,
                 listener,
                 CancellationToken.None,
-                logger);
+                options.Logger);
 
             return new PeerConnection(channel, call, session);
         }
