@@ -209,6 +209,113 @@ public sealed class ClusterCoordinatorTests
     }
 
     [Fact]
+    public async Task FailoverRebalancingSpreadsTheGroupsInsteadOfPilingThemOnOneNode()
+    {
+        // Six groups all led by the same node, then that node goes away. Every group elects a new leader in
+        // the same window, and the cluster leader evaluates all of them against one load picture.
+        //
+        // Load reports arrive on their own interval, so that picture does not move while the pass runs: read
+        // literally, it names the same least-loaded node six times and every group is handed to it -- the
+        // failure this test exists for. What must happen instead is that each transfer counts against its
+        // target for the ordering of the groups still to be decided.
+        // Load reports slower than the reconcile pass, as in production: a pass reads numbers that predate
+        // it and does not see its own transfers land while it is still deciding.
+        await using var cluster = new ClusterTestCluster { LoadReportInterval = TimeSpan.FromSeconds(1) };
+        await cluster.AddNodesAsync(1, 2, 3, 4, 5);
+        await cluster.WaitForFormedAsync();
+
+        // The node that is about to fail must not be the cluster leader: a fresh cluster leader has never
+        // seen these groups before and treats none of their elections as a change, which would leave the
+        // behaviour under test unexercised rather than passing it.
+        ulong victim = cluster.Nodes
+            .First(n => !n.Coordinator.IsClusterLeader)
+            .Self.Value;
+
+        RaftGroupId[] groups = [.. Enumerable.Range(400, 6).Select(i => new RaftGroupId((ulong)i))];
+        foreach (RaftGroupId group in groups)
+        {
+            await cluster.CreateGroupEverywhereAsync(group, initialLeader: victim);
+        }
+
+        // One reconcile pass has to record where the groups are before their leaders can read as changed.
+        await ClusterTestCluster.WaitUntilAsync(
+            () => cluster.Nodes.First(n => n.Coordinator.IsClusterLeader).Coordinator.GetLoad().Nodes.Count == 5,
+            "every node to have reported its load at least once",
+            TimeSpan.FromSeconds(20));
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        await cluster.Node(victim).StopAsync();
+
+        await ClusterTestCluster.WaitUntilAsync(
+            () => LeadersNow().Count == groups.Length,
+            "every group to elect a new leader",
+            TimeSpan.FromSeconds(30));
+
+        // Sampled across several reconcile passes rather than read once. Both halves of this failure need
+        // time to show: the pass that gathers the groups, and the passes after it that read its own transfers
+        // back as fresh failovers and gather them again somewhere else.
+        List<Dictionary<RaftGroupId, NodeId>> samples = [];
+        for (int i = 0; i < 30; i++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(300));
+            Dictionary<RaftGroupId, NodeId> sample = LeadersNow();
+            if (sample.Count == groups.Length)
+            {
+                samples.Add(sample);
+            }
+        }
+
+        Assert.NotEmpty(samples);
+
+        string Describe(Dictionary<RaftGroupId, NodeId> p)
+            => string.Join(" ", p.OrderBy(x => x.Key.Value).Select(x => $"{x.Key.Value}->{x.Value.Value}"));
+
+        // Four nodes are left for six groups. The exact split is the election's business; what is asserted is
+        // that no pass gathered them, which piling onto one node is.
+        foreach (Dictionary<RaftGroupId, NodeId> sample in samples)
+        {
+            int worst = sample.Values.GroupBy(n => n).Max(g => g.Count());
+            Assert.True(
+                worst <= 4,
+                $"leaderships must stay spread after a failover, but one node holds {worst} of "
+                + $"{groups.Length}: {Describe(sample)}");
+        }
+
+        // And it has to come to rest. A rebalance that keeps moving groups is not a placement, it is a churn:
+        // the last third of the window must show no movement at all.
+        List<Dictionary<RaftGroupId, NodeId>> tail = [.. samples.Skip(samples.Count * 2 / 3)];
+        for (int i = 1; i < tail.Count; i++)
+        {
+            Assert.True(
+                tail[i].All(pair => tail[i - 1][pair.Key] == pair.Value),
+                "rebalancing must settle, but leadership was still moving at the end of the window: "
+                + $"{Describe(tail[i - 1])} then {Describe(tail[i])}");
+        }
+
+        Dictionary<RaftGroupId, NodeId> LeadersNow()
+        {
+            Dictionary<RaftGroupId, NodeId> leaders = [];
+            foreach (RaftGroupId group in groups)
+            {
+                NodeId[] holders =
+                [
+                    .. cluster.Nodes
+                        .Where(n => n.Self.Value != victim)
+                        .Where(n => n.Host.TryGetGroup(group, out RaftGroupInstance? g) && g is { IsLeader: true })
+                        .Select(n => n.Self),
+                ];
+
+                if (holders.Length == 1)
+                {
+                    leaders[group] = holders[0];
+                }
+            }
+
+            return leaders;
+        }
+    }
+
+    [Fact]
     public async Task ARefusedTransferLeavesTheExistingLeaderInPlace()
     {
         await using var cluster = new ClusterTestCluster();

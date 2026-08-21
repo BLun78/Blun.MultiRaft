@@ -67,6 +67,19 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     // state whenever it stops being the cluster leader, for the same reason _available is.
     private readonly Dictionary<RaftGroupId, NodeId?> _lastKnownLeader = [];
 
+    // Leaderships this node has already handed out but has not yet seen reflected in a load report, counted
+    // on top of the reported number while ordering candidates. Load reports are pushed on their own interval,
+    // so within one reconcile pass -- and usually for several passes after it -- every group asking "who is
+    // carrying least?" reads the same numbers and names the same node, piling every failed-over group onto a
+    // single target. The projected delta is what makes the second question's answer differ from the first's.
+    // An entry is dropped as soon as a report from that node arrives that was counted after the transfer,
+    // since the measured number then supersedes the guess.
+    private readonly Dictionary<NodeId, Projection> _projectedLeaders = [];
+
+    // _projectedLeaders is written from the reconcile pass and cleared from OnLoadReportAsync, which arrives
+    // on the transport's thread. Held only for the dictionary operations themselves, never across an await.
+    private readonly Lock _projectionGate = new();
+
     /// <summary>Creates a coordinator over an already-constructed host. Nothing happens until <see cref="StartAsync"/>.</summary>
     public ClusterCoordinator(
         MultiRaftHost host,
@@ -405,6 +418,18 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
                 ? existing with { Timestamp = now }
                 : new LoadEntry(report.Node, report.Sequence, report.GroupCount, report.LeaderCount, now));
 
+        // The measured number now supersedes anything this node projected onto that report -- but only for a
+        // report the node produced *after* the transfer was requested. One that was already on the wire
+        // cannot know about it, and dropping the projection on that would put the herd right back.
+        lock (_projectionGate)
+        {
+            if (_projectedLeaders.TryGetValue(report.Node, out Projection projection)
+                && report.Sequence > projection.ObservedSequence)
+            {
+                _projectedLeaders.Remove(report.Node);
+            }
+        }
+
         return ValueTask.CompletedTask;
     }
 
@@ -564,10 +589,25 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         return candidates;
 
         int LeaderCountOf(NodeId node)
-            => _load.TryGetValue(node, out LoadEntry entry)
-               && ElapsedSince(entry.Timestamp, now) <= _options.LoadReportTtl
-                ? entry.LeaderCount
-                : int.MaxValue;
+        {
+            if (!_load.TryGetValue(node, out LoadEntry entry)
+                || ElapsedSince(entry.Timestamp, now) > _options.LoadReportTtl)
+            {
+                // No evidence this node is idle. Unmeasured ranks below every measured node, and a projection
+                // is not evidence either -- it only ever adds to a real report.
+                return int.MaxValue;
+            }
+
+            int projected;
+            lock (_projectionGate)
+            {
+                projected = _projectedLeaders.TryGetValue(node, out Projection projection) ? projection.Delta : 0;
+            }
+
+            // Saturating, so a projection can never wrap into "least loaded".
+            long count = (long)entry.LeaderCount + projected;
+            return count >= int.MaxValue ? int.MaxValue - 1 : count < 0 ? 0 : (int)count;
+        }
     }
 
     /// <summary>Puts a leadership question to the group's leader, wherever it is.</summary>
@@ -714,6 +754,11 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             _availableSeeded = false;
             _available = [];
             _lastKnownLeader.Clear();
+            lock (_projectionGate)
+            {
+                _projectedLeaders.Clear();
+            }
+
             return;
         }
 
@@ -770,10 +815,15 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// Fires once per change, not on a standing preference: this pass records what it saw and only acts
-    /// again the next time the leader is different from that. A cluster already settled on a good placement
-    /// pays nothing for this being on, and a single transfer here cannot loop -- the target it moves to is
-    /// exactly the one <see cref="OrderCandidates"/> would name again, so the following pass finds no change
-    /// and stops.
+    /// again the next time the leader is different from that. A transfer this pass performed is recorded as
+    /// the expected leader, so the change it causes is not read back as a fresh failover — without that, one
+    /// transfer produces a change, the change produces another transfer, and the cluster never settles.
+    /// <para>
+    /// Every group that failed over in the same pass is ordered against a load picture that already counts
+    /// the transfers this pass handed out (<see cref="_projectedLeaders"/>). Load reports arrive on their own
+    /// interval, so ordering against the reported numbers alone would answer "who is carrying least?" with
+    /// the same node for every group and move all of them onto it at once.
+    /// </para>
     /// </remarks>
     private async ValueTask RebalanceAsync(CancellationToken cancellationToken)
     {
@@ -803,7 +853,38 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
                 continue;
             }
 
-            await RequestLeaderTransferAsync(id, candidates[0], cancellationToken).ConfigureAwait(false);
+            NodeId target = candidates[0];
+            LeaderTargetResponse response = await RequestLeaderTransferAsync(id, target, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!response.Transferred)
+            {
+                // Refused or unreachable. _lastKnownLeader already holds what is actually leading, so the
+                // next pass sees no change and this is not retried in a spin -- the group keeps the leader
+                // Raft gave it, which is a legal one, just not the preferred one.
+                continue;
+            }
+
+            // This node moved the leadership, so the change the next pass observes is this pass's own doing,
+            // not a new failover to react to. Recording the target here is what keeps a single transfer from
+            // reading as a fresh event and starting a chain of them.
+            _lastKnownLeader[id] = target;
+            Project(target, +1);
+            if (currentLeader is { } previous)
+            {
+                Project(previous, -1);
+            }
+        }
+
+        void Project(NodeId node, int delta)
+        {
+            long observed = _load.TryGetValue(node, out LoadEntry entry) ? entry.Sequence : long.MinValue;
+            lock (_projectionGate)
+            {
+                _projectedLeaders[node] = _projectedLeaders.TryGetValue(node, out Projection existing)
+                    ? existing with { Delta = existing.Delta + delta }
+                    : new Projection(delta, observed);
+            }
         }
     }
 
@@ -918,6 +999,13 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
 
         int Rank(NodeId node) => node == clusterLeader ? 1 : 0;
     }
+
+    /// <summary>
+    /// A leadership count this node has handed out but not yet seen reported back.
+    /// <paramref name="ObservedSequence"/> is the reporting node's sequence at the moment of the transfer:
+    /// only a report numbered above it can have counted the transfer, and only such a report retires this.
+    /// </summary>
+    private readonly record struct Projection(int Delta, long ObservedSequence);
 
     private readonly record struct LoadEntry(
         NodeId Node,
