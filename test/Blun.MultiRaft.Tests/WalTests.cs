@@ -297,6 +297,63 @@ public sealed class MessageSizeLimitTests : IDisposable
     }
 
     [Fact]
+    public async Task APayloadOverTheCapIsRejectedByTheBatchOverloadToo()
+    {
+        // SEC-008: only the single-entry overload above checked MaxPayloadBytes. The batch overload is what
+        // AppendEntries actually writes on the receive path, and an oversized entry that slips past it here
+        // is not caught until the next restart, where recovery truncates the log from that point on -- this
+        // is the regression guard for that gap, sharing the contract test suite both overloads are supposed to.
+        await using SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory);
+
+        var options = new SegmentedRaftWalOptions();
+        var payload = new byte[options.MaxPayloadBytes + 1];
+        var header = new RaftEntryHeader(1, 1, RaftEntryKind.Command, payload.Length, DateTime.UtcNow.Ticks);
+        RaftLogEntry[] entries = [new RaftLogEntry(header, payload)];
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await wal.AppendAsync(entries));
+    }
+
+    [Fact]
+    public async Task ABatchWithAMismatchedHeaderLengthIsRejected()
+    {
+        await using SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory);
+
+        byte[] payload = [1, 2, 3];
+        var header = new RaftEntryHeader(1, 1, RaftEntryKind.Command, payload.Length + 1, DateTime.UtcNow.Ticks);
+        RaftLogEntry[] entries = [new RaftLogEntry(header, payload)];
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await wal.AppendAsync(entries));
+    }
+
+    [Fact]
+    public async Task ARejectedBatchLeavesNoPartialWrite()
+    {
+        // The whole batch is validated before the write gate specifically so a rejection never leaves the
+        // first (valid) entries written and the rest missing -- verified here by checking LastIndex is back
+        // to where it started, not just that the call throws.
+        await using SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory);
+
+        var options = new SegmentedRaftWalOptions();
+        byte[] validPayload = [1, 2, 3];
+        byte[] oversizedPayload = new byte[options.MaxPayloadBytes + 1];
+        RaftLogEntry[] entries =
+        [
+            new RaftLogEntry(
+                new RaftEntryHeader(1, 1, RaftEntryKind.Command, validPayload.Length, DateTime.UtcNow.Ticks),
+                validPayload),
+            new RaftLogEntry(
+                new RaftEntryHeader(1, 2, RaftEntryKind.Command, oversizedPayload.Length, DateTime.UtcNow.Ticks),
+                oversizedPayload),
+        ];
+
+        long before = wal.LastIndex;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await wal.AppendAsync(entries));
+        Assert.Equal(before, wal.LastIndex);
+    }
+
+    [Fact]
     public async Task ASegmentTooSmallForOneRecordIsRefusedAtOpen()
     {
         // Rejected at open rather than on the first large append: a record that cannot fit a segment would
