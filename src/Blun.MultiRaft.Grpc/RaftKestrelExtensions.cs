@@ -41,14 +41,36 @@ public static class RaftKestrelExtensions
     /// that failure is visible immediately as "nothing connects," not as something this method could catch
     /// in advance without knowing what certificate setup the host intends to use.
     /// </param>
+    /// <param name="allowCleartext">
+    /// Must be set to accept an endpoint on a non-loopback address with no <paramref name="configureListen"/>
+    /// (and therefore no TLS): otherwise this call throws. See SEC-002 in <c>doc/audit</c> — the replication
+    /// stream carries every queue payload and the full state in a snapshot, and without TLS all of it is
+    /// readable and alterable by anyone on the network path. Loopback addresses are exempt because there is no
+    /// network path to protect against.
+    /// </param>
     public static void ConfigureRaftEndpoint(
         this KestrelServerOptions options,
         IPAddress address,
         int port,
         RaftGrpcProtocol protocol = RaftGrpcProtocol.Http2,
         int maxStreamsPerConnection = DefaultMaxStreamsPerConnection,
-        Action<ListenOptions>? configureListen = null)
+        Action<ListenOptions>? configureListen = null,
+        bool allowCleartext = false)
     {
+        // HTTP/3 mandates TLS at the QUIC layer, so there is no cleartext case to guard there. For HTTP/2, an
+        // endpoint with no configureListen callback has no way to have called UseHttps, so it is h2c -- the
+        // one combination this check exists to make an explicit decision instead of a silent default.
+        if (protocol != RaftGrpcProtocol.Http3
+            && configureListen is null
+            && !IPAddress.IsLoopback(address)
+            && !allowCleartext)
+        {
+            throw new InvalidOperationException(
+                $"ConfigureRaftEndpoint({address}:{port}) would accept unencrypted h2c Raft traffic on a "
+                + "non-loopback address. Pass configureListen to call listen.UseHttps(...), or pass "
+                + "allowCleartext: true to accept the risk explicitly. See SEC-002 in doc/audit.");
+        }
+
         options.Limits.Http2.MaxStreamsPerConnection = maxStreamsPerConnection;
 
         options.Listen(
