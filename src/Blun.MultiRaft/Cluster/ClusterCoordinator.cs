@@ -61,6 +61,12 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     // Last published observational state, for the same reason.
     private (NodeId? Leader, ClusterServiceState State, int Members) _lastPublished = (null, ClusterServiceState.Starting, -1);
 
+    // What the cluster leader last saw as each locally-hosted group's leader, for RebalanceOnFailover: a
+    // transfer is only worth asking for on the pass where the leader actually changed, not on every pass a
+    // healthy cluster is already settled on a good placement. Reset with the rest of this node's leader-only
+    // state whenever it stops being the cluster leader, for the same reason _available is.
+    private readonly Dictionary<RaftGroupId, NodeId?> _lastKnownLeader = [];
+
     /// <summary>Creates a coordinator over an already-constructed host. Nothing happens until <see cref="StartAsync"/>.</summary>
     public ClusterCoordinator(
         MultiRaftHost host,
@@ -707,6 +713,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
             // stale arrivals.
             _availableSeeded = false;
             _available = [];
+            _lastKnownLeader.Clear();
             return;
         }
 
@@ -749,6 +756,55 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         }
 
         RaiseAvailability(group);
+
+        if (_options.RebalanceOnFailover)
+        {
+            await RebalanceAsync(token).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Applies the load-based placement rule after an unplanned leadership change. Cluster leader only, and
+    /// only for groups hosted on this node -- <see cref="OrderCandidates"/> already needs a local instance to
+    /// answer, so there is nothing to compare a remote group's leader against.
+    /// </summary>
+    /// <remarks>
+    /// Fires once per change, not on a standing preference: this pass records what it saw and only acts
+    /// again the next time the leader is different from that. A cluster already settled on a good placement
+    /// pays nothing for this being on, and a single transfer here cannot loop -- the target it moves to is
+    /// exactly the one <see cref="OrderCandidates"/> would name again, so the following pass finds no change
+    /// and stops.
+    /// </remarks>
+    private async ValueTask RebalanceAsync(CancellationToken cancellationToken)
+    {
+        foreach (RaftGroupInstance instance in _host.Groups)
+        {
+            RaftGroupId id = instance.Group;
+            if (id == RaftGroupId.Cluster)
+            {
+                continue;
+            }
+
+            NodeId? currentLeader = instance.LeaderId;
+            bool known = _lastKnownLeader.TryGetValue(id, out NodeId? previousLeader);
+            _lastKnownLeader[id] = currentLeader;
+
+            // First sighting of this group, or no leadership change since the last pass: nothing to react
+            // to. A fresh cluster leader would otherwise treat every group it just started watching as a
+            // change and go transfer all of them at once.
+            if (!known || currentLeader == previousLeader || currentLeader is null)
+            {
+                continue;
+            }
+
+            List<NodeId> candidates = OrderCandidates(id, exclude: null);
+            if (candidates.Count == 0 || candidates[0] == currentLeader)
+            {
+                continue;
+            }
+
+            await RequestLeaderTransferAsync(id, candidates[0], cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

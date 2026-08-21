@@ -162,10 +162,19 @@ Inside `src/Blun.MultiRaft`:
   by `MultiRaftHost.AddGroupAsync`.
 - **The cluster group's voter set *is* the cluster's node set.** Adding a node = adding a voter, via the
   existing single-server-change path. No separate membership mechanism.
-- **The library decides nothing about placement.** Nothing rebalances on a timer or a threshold. The
-  coordinator answers two questions (is this node a legal target? who is carrying least?) and performs a
-  handover when asked. `ClusterEventKind.NodeBecameAvailable` fires on the **cluster leader only** so one
-  reactor decides, not N.
+- **The library decides nothing about placement on its own initiative — it only reacts.** Nothing
+  rebalances on a timer or a threshold. The coordinator answers two questions (is this node a legal target?
+  who is carrying least?) and performs a handover when asked. `ClusterEventKind.NodeBecameAvailable` fires on
+  the **cluster leader only** so one reactor decides, not N.
+- **`ClusterOptions.RebalanceOnFailover` (default `true`) is the one exception, and it is still a reaction,
+  not a schedule.** Raft's election cannot be load-aware — it has to complete under partition without
+  waiting on load reports that may never arrive — so an unplanned leader loss lands wherever the randomized
+  election happens to put it, which is not necessarily the least-loaded legal target. Each `ReconcileAsync`
+  pass on the cluster leader (`ClusterCoordinator.RebalanceAsync`) compares the leader of every
+  locally-hosted group against what `OrderCandidates` would pick, and asks for exactly one transfer when
+  they disagree — only on the pass where the leader actually changed (`_lastKnownLeader`), never as a
+  standing preference that could fight a leader for reasons of its own. Evaluated only for groups the
+  cluster leader itself hosts, because `OrderCandidates` needs a local instance to answer at all.
 - **"A legal target" is two separate checks, and both defaults are derived rather than picked.**
   `LeaderTargetLagThreshold` (null → `MaxEntriesPerAppend`, one replication round) and
   `LeaderTargetContactWindow` (null → 2× `ElectionTimeout`, the coordinator's own availability window).

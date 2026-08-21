@@ -76,10 +76,29 @@ public sealed class ClusterOptions
     /// and re-checks which nodes are online.
     /// </summary>
     /// <remarks>
-    /// This is membership convergence, not load balancing. Nothing on a timer ever moves a group's leader:
-    /// leadership changes on this node's own initiative only when Raft itself decides one is needed.
+    /// This pass also drives <see cref="RebalanceOnFailover"/> when that is enabled: it is the same
+    /// cadence at which the cluster leader notices a group's leader has changed.
     /// </remarks>
     public TimeSpan ReconcileInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Whether the cluster leader applies the load-based placement rule after an unplanned leadership
+    /// change, moving a group's new leader to the least-loaded legal target if the node Raft's own election
+    /// picked is not already that target. Default <see langword="true"/>.
+    /// </summary>
+    /// <remarks>
+    /// Raft's election is unaware of load by design — it cannot be, an election has to complete under
+    /// partition without waiting on load reports that may never arrive. This option is what closes that
+    /// gap afterwards: once a term settles, the cluster leader compares the node Raft picked against the
+    /// placement rule's own answer, and if they disagree, asks for a transfer the same way an operator would
+    /// through <see cref="ClusterCoordinator.RequestLeaderTransferAsync"/>.
+    /// A transfer here is exactly one immediate handover, not a standing preference — nothing loops back to
+    /// re-check a decision once it is made, so this cannot fight a leader that later loses more elections
+    /// for reasons of its own. Only ever evaluated for groups hosted on the cluster leader itself, and only
+    /// on the change, not continuously, so a healthy cluster settled on a good placement pays nothing for
+    /// this being on.
+    /// </remarks>
+    public bool RebalanceOnFailover { get; init; } = true;
 
     /// <summary>Tuning for the cluster group itself. Election timings are deliberately more generous than a
     /// queue group's: administrative work is rare, and a needless election here is more costly than a slow
