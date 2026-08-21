@@ -4,6 +4,8 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
+using System.Buffers.Binary;
+using System.Globalization;
 using System.Text;
 using Blun.MultiRaft.Wal;
 
@@ -184,6 +186,36 @@ public sealed class SnapshotTests
         Assert.Equal(membership.Voters, restored.Voters);
         Assert.Equal(membership.Learners, restored.Learners);
         Assert.Equal(membership.QuorumSize, restored.QuorumSize);
+    }
+
+    [Fact]
+    public async Task ACorruptConfigLengthIsTreatedAsAMissingSnapshotNotAStartupFailure()
+    {
+        // SEC-010: configLength came straight out of the file and into `new byte[configLength]` with no
+        // bound. One flipped bit in that field used to throw out of a method group startup calls -- refusing
+        // to start over a damaged snapshot -- instead of the "no usable snapshot" outcome a bad magic byte
+        // just above it already gets.
+        string root = Path.Combine(Path.GetTempPath(), "blun-mr-store-" + Guid.CreateVersion7().ToString("N"));
+        try
+        {
+            var store = new FileRaftSnapshotStore(root);
+            await store.WriteAsync(Queue, new RaftSnapshotMetadata(10, 1, ReadOnlyMemory<byte>.Empty), Chunks("good"));
+
+            string path = Path.Combine(root, "g" + Queue.Value.ToString("D20", CultureInfo.InvariantCulture) + ".snap");
+            byte[] bytes = await File.ReadAllBytesAsync(path);
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(24), int.MaxValue);
+            await File.WriteAllBytesAsync(path, bytes);
+
+            RaftSnapshotMetadata? metadata = await store.ReadMetadataAsync(Queue);
+            Assert.Null(metadata);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     [Fact]

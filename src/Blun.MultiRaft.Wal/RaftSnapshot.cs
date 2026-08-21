@@ -158,10 +158,28 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
         long term = BinaryPrimitives.ReadInt64LittleEndian(header.AsSpan(16));
         int configLength = BinaryPrimitives.ReadInt32LittleEndian(header.AsSpan(24));
 
+        // Bounded against the file's own length before it is trusted into an allocation (SEC-010): a
+        // negative or oversized configLength -- one flipped bit is enough -- otherwise throws out of a method
+        // called at group startup, which stops the node instead of treating a damaged snapshot the same way
+        // a bad magic just above already does: as though it were missing. WalSegment.RecoverAsync applies
+        // this same rule to log records for the identical reason.
+        if (configLength < 0 || RaftSnapshotMetadata.HeaderSize + (long)configLength > stream.Length)
+        {
+            return null;
+        }
+
         byte[] configuration = new byte[configLength];
         if (configLength > 0)
         {
-            await stream.ReadExactlyAsync(configuration, cancellationToken).ConfigureAwait(false);
+            int read = await stream
+                .ReadAtLeastAsync(configuration, configuration.Length, throwOnEndOfStream: false, cancellationToken)
+                .ConfigureAwait(false);
+            if (read < configuration.Length)
+            {
+                // The length check above used the file's reported length; a truncated file (crash mid-write)
+                // can still under-deliver against it, so this is the same "damaged, not missing" case.
+                return null;
+            }
         }
 
         return new RaftSnapshotMetadata(index, term, configuration);
