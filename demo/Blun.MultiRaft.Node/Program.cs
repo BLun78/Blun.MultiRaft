@@ -26,9 +26,10 @@ builder.Services.AddHostFiltering(options =>
     options.AllowedHosts = ["localhost", "127.0.0.1", "[::1]"];
 });
 
-var self = new NodeId(ulong.Parse(
-    builder.Configuration["RAFT_NODE_ID"] ?? "1",
-    CultureInfo.InvariantCulture));
+// D-009: a bare Parse on a typo'd environment variable threw a FormatException with no indication of which
+// setting was at fault. Aborting is still the right call here -- a node with the wrong id must not start --
+// but the message should say what to fix instead of leaving a bare stack trace to read.
+var self = new NodeId(ParseConfigValue<ulong>(builder.Configuration, "RAFT_NODE_ID", "1", ulong.TryParse));
 
 // Peers come in as RAFT_PEER_<id>=http://host:port. Literal addresses rather than service discovery on
 // purpose: every node needs every other node's address, and three mutually referencing resources is a
@@ -50,8 +51,8 @@ foreach (KeyValuePair<string, string?> setting in builder.Configuration.AsEnumer
 //
 // So: a dedicated port for the Raft protocol, and an HTTP/1.1 port for /status so the scenario stays
 // observable with an ordinary HTTP client without ever needing a certificate.
-int raftPort = int.Parse(builder.Configuration["RAFT_PORT"] ?? "7101", CultureInfo.InvariantCulture);
-int statusPort = int.Parse(builder.Configuration["RAFT_STATUS_PORT"] ?? "8101", CultureInfo.InvariantCulture);
+int raftPort = ParseConfigValue<int>(builder.Configuration, "RAFT_PORT", "7101", int.TryParse);
+int statusPort = ParseConfigValue<int>(builder.Configuration, "RAFT_STATUS_PORT", "8101", int.TryParse);
 
 // RAFT_PROTOCOL is opt-in and defaults to Http2 (cleartext h2c, no certificate needed -- the local-playground
 // default). Http3 has no cleartext mode at all -- QUIC mandates TLS -- so that branch also turns on the
@@ -133,3 +134,20 @@ app.MapPost(
     async (RaftNodeHost host, ulong group, ulong? node) => Results.Json(await host.RequestLeaderAsync(group, node)));
 
 app.Run();
+
+// D-009: turns a mistyped environment variable into a message naming the setting instead of a bare
+// FormatException stack trace. Delegate matches the shape int.TryParse/ulong.TryParse already have.
+static T ParseConfigValue<T>(
+    IConfiguration configuration, string key, string defaultValue, TryParseHandler<T> tryParse)
+    where T : struct
+{
+    string raw = configuration[key] ?? defaultValue;
+    if (!tryParse(raw, CultureInfo.InvariantCulture, out T value))
+    {
+        throw new InvalidOperationException($"{key} is set to '{raw}', which is not a valid {typeof(T).Name}.");
+    }
+
+    return value;
+}
+
+delegate bool TryParseHandler<T>(string? s, IFormatProvider? provider, out T result);
