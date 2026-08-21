@@ -75,6 +75,15 @@ internal static class LogStream
             {
                 // Expected while shutting the upstream connections down.
             }
+#pragma warning disable CA1031 // PumpAsync now handles every exception it can anticipate internally and
+                               // loops rather than fault; this is the backstop for whatever it can't, so a
+                               // page closing never throws out of an SSE response's finally and masks
+                               // whatever the real problem in the merge loop above was.
+            catch (Exception ex)
+            {
+                ObserverLog.LogStreamDropped(logger, 0, ex.Message);
+            }
+#pragma warning restore CA1031
         }
     }
 
@@ -139,6 +148,15 @@ internal static class LogStream
             }
             catch (IOException ex)
             {
+                ObserverLog.LogStreamDropped(logger, node.Id, ex.Message);
+            }
+            catch (JsonException ex)
+            {
+                // A connection cut mid-line hands ReadLineAsync the truncated remainder as its last "line".
+                // If that fragment happens to start with "data: ", it reaches Deserialize and throws -- not a
+                // transport failure, but the same "reconnect and carry on" response as one: this stream
+                // carries all five nodes' consoles (see the type's own remarks), so letting the pump task
+                // fault here would take every node's log window down with it, not just this one's.
                 ObserverLog.LogStreamDropped(logger, node.Id, ex.Message);
             }
 
