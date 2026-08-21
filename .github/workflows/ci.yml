@@ -25,14 +25,14 @@ jobs:
 
     steps:
       # D-007(b): tags are movable, so a compromised action repo that moves its vN tag would have this
-      # workflow run the new code on the next push/PR without any change here. Pinning to a commit SHA is
-      # the fix, but it requires verifying the SHA for each action's actual current release against GitHub
-      # at the time of pinning -- left as a tag for now rather than guessing a SHA that cannot be verified
-      # from inside this environment; whoever pins these should record `# vX.Y.Z` next to each SHA as the
-      # audit doc's own example does.
-      - uses: actions/checkout@v4
+      # workflow run the new code on the next push/PR without any change here. Pinned to each action's
+      # latest v4.x release SHA (verified against GitHub's API at pinning time, not guessed) rather than a
+      # newer major -- actions/checkout, actions/setup-dotnet and actions/upload-artifact have all moved on
+      # to v6/v7, but jumping majors is a separate, deliberate upgrade decision, not something that belongs
+      # bundled into a supply-chain hardening pass.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: |
             10.0.x
@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-results-${{ matrix.os }}
           path: '**/TestResults/*.trx'
