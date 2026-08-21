@@ -5,7 +5,10 @@
 // for the full license text.
 
 using System.Net;
+using System.Runtime.Versioning;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Quic;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Blun.MultiRaft.Grpc;
 
@@ -30,9 +33,24 @@ public static class RaftKestrelExtensions
     public const int DefaultMaxConcurrentConnections = 256;
 
     /// <summary>
+    /// Kestrel's own default for <c>QuicTransportOptions.MaxUnidirectionalStreamCount</c> is 10. HTTP/3 spends
+    /// unidirectional streams on control and QPACK streams rather than on requests, so this is raised only
+    /// proportionally — it is not the request-carrying limit, which is
+    /// <see cref="DefaultMaxStreamsPerConnection"/>'s HTTP/3 counterpart.
+    /// </summary>
+    public const int DefaultMaxUnidirectionalStreamCount = 64;
+
+    /// <summary>
     /// Configures one Kestrel endpoint for the Raft protocol: the chosen HTTP version, and a per-connection
     /// concurrent-stream ceiling raised well past Kestrel's default of 100.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="maxStreamsPerConnection"/> reaches HTTP/2 only. HTTP/3's equivalent ceiling lives on the
+    /// QUIC transport (<c>QuicTransportOptions.MaxBidirectionalStreamCount</c>), which is not reachable from
+    /// <see cref="KestrelServerOptions"/> at all — a host serving <see cref="RaftGrpcProtocol.Http3"/> must also
+    /// call <see cref="ConfigureRaftQuicTransport"/>, or the endpoint silently keeps QUIC's default of 100
+    /// concurrent request streams while HTTP/2 gets the raised value.
+    /// </remarks>
     /// <remarks>
     /// This endpoint accepts any caller as any <c>NodeId</c> unless <c>RaftProtocolServiceExtensions.AddRaftProtocol</c>
     /// is given an <see cref="IRaftPeerAuthenticator"/>. Without one, whoever can reach this port controls the
@@ -94,5 +112,34 @@ public static class RaftKestrelExtensions
                 
                 configureListen?.Invoke(listen);
             });
+    }
+
+    /// <summary>
+    /// HTTP/3 counterpart to <see cref="ConfigureRaftEndpoint"/>'s <c>maxStreamsPerConnection</c>: raises the
+    /// QUIC transport's per-connection concurrent-stream ceilings to match what the HTTP/2 path already gets.
+    /// Call this alongside <see cref="ConfigureRaftEndpoint"/> whenever the endpoint speaks
+    /// <see cref="RaftGrpcProtocol.Http3"/>; it is inert for an HTTP/2-only host.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ConfigureRaftEndpoint"/> because the two ceilings live on different objects:
+    /// HTTP/2's is a Kestrel limit, HTTP/3's is a transport option bound through DI, and nothing on
+    /// <see cref="KestrelServerOptions"/> can reach it. <c>QuicTransportOptions</c> is still a .NET preview API,
+    /// which is why this method carries <see cref="RequiresPreviewFeaturesAttribute"/> rather than the library
+    /// opting every consumer in: a host that wants HTTP/3 sets <c>EnablePreviewFeatures</c> and accepts that the
+    /// shape of these options may change, and a host on HTTP/2 never sees the requirement.
+    /// </remarks>
+    [RequiresPreviewFeatures("QuicTransportOptions is a .NET preview API and may change in a future release.")]
+    public static IServiceCollection ConfigureRaftQuicTransport(
+        this IServiceCollection services,
+        int maxStreamsPerConnection = DefaultMaxStreamsPerConnection,
+        int maxUnidirectionalStreamCount = DefaultMaxUnidirectionalStreamCount)
+    {
+        services.Configure<QuicTransportOptions>(quic =>
+        {
+            quic.MaxBidirectionalStreamCount = maxStreamsPerConnection;
+            quic.MaxUnidirectionalStreamCount = maxUnidirectionalStreamCount;
+        });
+
+        return services;
     }
 }

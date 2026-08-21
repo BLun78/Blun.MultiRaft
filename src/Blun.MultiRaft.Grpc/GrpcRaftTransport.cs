@@ -57,11 +57,25 @@ public sealed class GrpcRaftTransportOptions
     public string? UserAgent { get; init; }
 
     /// <summary>
-    /// Compression applied to this node's outbound requests. Response compression is negotiated separately,
-    /// via the peer's configured algorithm and the accept-encoding implied by <see cref="CompressionLevel"/>'s
-    /// providers below. Matches <c>Blun.Mq.Client.MqClientOptions.Compression</c>.
+    /// Off by default: an idle-cluster heartbeat or a small <c>AppendEntries</c> rarely has enough payload for
+    /// compression to pay for its own CPU cost, so this is opt-in rather than assumed. When turned on, applies
+    /// to this node's outbound requests only -- response compression is negotiated separately, via the peer's
+    /// configured algorithm and the accept-encoding implied by <see cref="CompressionLevel"/>'s providers below.
     /// </summary>
-    public RaftGrpcCompression Compression { get; init; } = RaftGrpcCompression.None;
+    public bool EnableCompression { get; init; }
+
+    /// <summary>
+    /// Compression algorithm used once <see cref="EnableCompression"/> is on. Zstandard by default -- best
+    /// ratio/speed trade-off of the three (.NET 11+ only; see <see cref="RaftGrpcCompression"/>). Matches
+    /// <c>Blun.Mq.Client.MqClientOptions.Compression</c>'s options, minus the "off" state, which
+    /// <see cref="EnableCompression"/> now owns.
+    /// </summary>
+    public RaftGrpcCompression Compression { get; init; } =
+#if NET11_0_OR_GREATER
+        RaftGrpcCompression.Zstd;
+#else
+        RaftGrpcCompression.Brotli;
+#endif
 
     /// <summary>Compression effort for both directions. Only relevant when <see cref="Compression"/> is set.</summary>
     public CompressionLevel CompressionLevel { get; init; } = CompressionLevel.Fastest;
@@ -463,15 +477,17 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
 
             // Opts this call's *requests* into compression. Responses are negotiated separately, via the
             // peer's configured algorithm and the accept-encoding implied by CompressionProviders above.
-            string? requestEncoding = options.Compression switch
-            {
+            string? requestEncoding = options.EnableCompression
+                ? options.Compression switch
+                {
 #if NET11_0_OR_GREATER
-                RaftGrpcCompression.Zstd => GrpcCompressionAlgorithms.Zstd,
+                    RaftGrpcCompression.Zstd => GrpcCompressionAlgorithms.Zstd,
 #endif
-                RaftGrpcCompression.Brotli => GrpcCompressionAlgorithms.Brotli,
-                RaftGrpcCompression.GZip => GrpcCompressionAlgorithms.GZip,
-                _ => null,
-            };
+                    RaftGrpcCompression.Brotli => GrpcCompressionAlgorithms.Brotli,
+                    RaftGrpcCompression.GZip => GrpcCompressionAlgorithms.GZip,
+                    _ => null,
+                }
+                : null;
 
             if (requestEncoding is not null)
             {

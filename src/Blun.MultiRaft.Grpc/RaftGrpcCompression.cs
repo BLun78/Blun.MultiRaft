@@ -6,10 +6,13 @@
 
 namespace Blun.MultiRaft.Grpc;
 
-/// <summary>Compression applied to this node's outbound requests. Mirrors <c>Blun.Mq.Client.MqCompression</c>.</summary>
+/// <summary>
+/// Compression algorithm applied to this node's outbound requests, once
+/// <see cref="GrpcRaftTransportOptions.EnableCompression"/> is on. Mirrors <c>Blun.Mq.Client.MqCompression</c>.
+/// </summary>
 public enum RaftGrpcCompression
 {
-    /// <summary>No compression. The default, matching the server's own default.</summary>
+    /// <summary>No compression, even if <see cref="GrpcRaftTransportOptions.EnableCompression"/> is on.</summary>
     None = 0,
 
     /// <summary>gzip — understood by every gRPC implementation.</summary>

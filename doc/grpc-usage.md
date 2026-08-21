@@ -133,10 +133,25 @@ builder.Services.AddSingleton(provider => new GrpcRaftTransport(
   constraint — every group multiplexes onto the one stream this transport holds per peer, as frames, not as
   separate HTTP/2 streams — but "the 101st concurrent thing still works" should hold regardless of how many
   streams a given deployment ends up opening, not just under this library's own current usage pattern.
-- On the client, `GrpcRaftTransport` unconditionally sets `SocketsHttpHandler.EnableMultipleHttp2Connections
-  = true`: if a connection to a peer ever does hit that peer's advertised stream limit, the handler opens a
-  second physical connection instead of queuing new streams behind the ones already in flight. This is the
-  client-side half of the same guarantee and needs no configuration of your own.
+- On the client, `GrpcRaftTransport` sets `SocketsHttpHandler.EnableMultipleHttp2Connections` and
+  `EnableMultipleHttp3Connections` (both default to `true`, both configurable on
+  `GrpcRaftTransportOptions`): if a connection to a peer ever does hit that peer's advertised stream limit,
+  the handler opens a second physical connection instead of queuing new streams behind the ones already in
+  flight. This is the client-side half of the same guarantee.
+
+`maxStreamsPerConnection` reaches **HTTP/2 only.** HTTP/3's equivalent ceiling is not a Kestrel limit at all
+— it lives on the QUIC transport as `QuicTransportOptions.MaxBidirectionalStreamCount`, bound through DI,
+which nothing on `KestrelServerOptions` can reach. An endpoint serving `RaftGrpcProtocol.Http3` therefore
+keeps QUIC's own default of 100 concurrent request streams unless the host also calls:
+
+```csharp
+builder.Services.ConfigureRaftQuicTransport();   // same 4096 default as the HTTP/2 side
+```
+
+`QuicTransportOptions` is still a .NET preview API, so `ConfigureRaftQuicTransport` carries
+`[RequiresPreviewFeatures]` rather than opting every consumer of this library in — a host that wants HTTP/3
+sets `<EnablePreviewFeatures>true</EnablePreviewFeatures>` and accepts that the shape of those options may
+change; a host on HTTP/2 never sees the requirement.
 
 `ConfigureRaftEndpoint` deliberately does **not** call `UseHttps(...)` itself — that means a using directive
 on `Microsoft.AspNetCore.Server.Kestrel.Https` and a certificate that's the host's responsibility, not this
