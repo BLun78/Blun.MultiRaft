@@ -248,11 +248,28 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
             .ConfigureAwait(false);
 
         // A concurrent caller may have won the race; keep whichever landed first and discard the loser
-        // rather than leaving two streams to the same peer.
+        // rather than leaving two streams to the same peer. When the existing entry is dead, the new
+        // connection replaces it and the dead one must still be disposed -- AddOrUpdate only tells us the
+        // winner, so the update delegate captures the discarded entry itself.
+        PeerConnection? loser = null;
         PeerConnection winner = _peers.AddOrUpdate(
             target,
             connection,
-            (_, current) => current.IsAlive ? current : connection);
+            (_, current) =>
+            {
+                if (current.IsAlive)
+                {
+                    return current;
+                }
+
+                loser = current;
+                return connection;
+            });
+
+        if (loser is not null)
+        {
+            await loser.DisposeAsync().ConfigureAwait(false);
+        }
 
         if (!ReferenceEquals(winner, connection))
         {
@@ -287,7 +304,9 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
 
         public RaftStreamSession Session { get; }
 
-        public bool IsAlive => !Session.ReaderLoop.IsCompleted;
+        // A dead writer leaves the reader running against a half-open connection: every frame the reader
+        // still receives is a reply to a call that will never be sent. Both loops must be alive.
+        public bool IsAlive => !Session.ReaderLoop.IsCompleted && !Session.WriterLoop.IsCompleted;
 
         public static ValueTask<PeerConnection> OpenAsync(
             Uri address,

@@ -287,6 +287,13 @@ internal sealed class RaftStreamSession : IAsyncDisposable
             // unreachable peer as a normal condition, but only if it is told.
             FailPending(ex);
         }
+        finally
+        {
+            // Symmetric with the reader loop's completion below: without this, a writer that dies leaves
+            // the outbound channel open and unbounded while nothing is reading from it, and IsAlive (which
+            // only watches the reader) keeps calling the session healthy.
+            _outbound.Writer.TryComplete();
+        }
     }
 
     private async Task PumpInboundAsync()
