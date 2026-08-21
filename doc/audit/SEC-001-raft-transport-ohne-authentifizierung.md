@@ -75,6 +75,24 @@ selbst mit mTLS fehlt die Bindung „dieses Zertifikat gehört zu genau dieser `
    von `ConfigureRaftEndpoint`: *dieser Endpunkt darf nur in einem vertrauenswürdigen Netzsegment
    erreichbar sein.*
 
+## Umsetzungsstand
+
+Empfehlung 2 und 4 sind umgesetzt: `IRaftPeerAuthenticator` (`src/Blun.MultiRaft.Grpc/RaftPeerAuthenticator.cs`)
+ist die Erweiterungsstelle, an der ein Client eine Identität behauptet und ein Server sie prüft, bevor er eine
+Session überhaupt annimmt. `SharedSecretRaftPeerAuthenticator` bindet einen geteilten Schlüssel per
+HMAC-SHA256 an die behauptete `NodeId` — wer den Schlüssel kennt, beweist Cluster-Mitgliedschaft, nicht eine
+bestimmte Identität. `RaftStreamSession` trägt jetzt ein `PeerId`-Feld, und `HandleRequestAsync` verwirft jeden
+`AppendEntries`-, `Vote`-, `InstallSnapshot`- oder `NodeLoad`-Frame, dessen behaupteter Absender nicht mit der
+authentifizierten `PeerId` übereinstimmt (protokolliert, nicht nur verworfen) — das ist Empfehlung 2. Ist kein
+`IRaftPeerAuthenticator` konfiguriert, bleibt der Endpunkt wie zuvor offen; `ConfigureRaftEndpoint`s XML-Doku
+weist jetzt ausdrücklich darauf hin.
+
+Schwächer als mTLS (Empfehlung 1) bleibt es: ein kompromittierter Schlüssel gilt für den ganzen Cluster, es
+gibt keine Bindung an ein TLS-Zertifikat, und Schlüsselrotation ist Sache der Implementierung. Das Interface
+ist genau deshalb schmal gehalten — eine mTLS-Variante, die die Zertifikatsidentität aus
+`ServerCallContext.AuthContext` liest, lässt sich als weiterer `IRaftPeerAuthenticator` nachreichen, ohne einen
+einzigen Aufrufer anzufassen.
+
 ## Verwandt
 
 - [SEC-002](SEC-002-klartext-transport-als-default.md) — Vertraulichkeit/Integrität auf dem Transport

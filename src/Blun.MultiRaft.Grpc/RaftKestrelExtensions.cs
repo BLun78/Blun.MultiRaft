@@ -25,6 +25,13 @@ public static class RaftKestrelExtensions
     /// Configures one Kestrel endpoint for the Raft protocol: the chosen HTTP version, and a per-connection
     /// concurrent-stream ceiling raised well past Kestrel's default of 100.
     /// </summary>
+    /// <remarks>
+    /// This endpoint accepts any caller as any <c>NodeId</c> unless <c>RaftProtocolServiceExtensions.AddRaftProtocol</c>
+    /// is given an <see cref="IRaftPeerAuthenticator"/>. Without one, whoever can reach this port controls the
+    /// cluster — see SEC-001 in <c>doc/audit</c> for the full impact. Configure an authenticator (a shared
+    /// secret at minimum, via <see cref="SharedSecretRaftPeerAuthenticator"/>, or mTLS via a custom
+    /// implementation), or ensure this endpoint is reachable only from a trusted network segment.
+    /// </remarks>
     /// <param name="configureListen">
     /// Anything further the endpoint needs — most commonly <c>listen.UseHttps(...)</c>. This library
     /// deliberately does not call that itself: HTTPS setup means a using directive on
