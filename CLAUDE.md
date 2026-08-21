@@ -175,6 +175,16 @@ Inside `src/Blun.MultiRaft`:
   they disagree — only on the pass where the leader actually changed (`_lastKnownLeader`), never as a
   standing preference that could fight a leader for reasons of its own. Evaluated only for groups the
   cluster leader itself hosts, because `OrderCandidates` needs a local instance to answer at all.
+- **Two things keep that reaction from becoming a herd, and both are load-bearing.** Load reports arrive on
+  their own interval (2 s against a 5 s pass by default), so a pass decides every group against numbers that
+  predate it. Without `_projectedLeaders` — the transfers this pass handed out, counted on top of each
+  target's reported number until a report numbered after the transfer retires the projection — "who is
+  carrying least?" answers with the same node for every group that failed over and moves all of them onto
+  it. And a transfer this pass performed is written back into `_lastKnownLeader` as the expected leader:
+  without that, the leadership change it caused reads as a fresh failover on the next pass, which transfers
+  again, forever. Symptom of either one missing is the same from outside — the demo's groups continuously
+  re-gathering on one node. `FailoverRebalancingSpreadsTheGroupsInsteadOfPilingThemOnOneNode` pins both, and
+  it only reproduces with load reports slower than the reconcile pass, which is why it configures its own.
 - **"A legal target" is two separate checks, and both defaults are derived rather than picked.**
   `LeaderTargetLagThreshold` (null → `MaxEntriesPerAppend`, one replication round) and
   `LeaderTargetContactWindow` (null → 2× `ElectionTimeout`, the coordinator's own availability window).

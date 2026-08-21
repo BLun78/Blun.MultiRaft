@@ -37,7 +37,8 @@ internal sealed class ClusterTestNode : IAsyncDisposable
         IRaftProtocolTransport transport,
         ImmutableArray<NodeId> nodes = default,
         IRaftStateMachine? adminStateMachine = null,
-        string? dataDirectory = null)
+        string? dataDirectory = null,
+        TimeSpan? loadReportInterval = null)
     {
         Self = new NodeId(id);
         _dataDirectory = dataDirectory;
@@ -74,7 +75,10 @@ internal sealed class ClusterTestNode : IAsyncDisposable
 
                 // Compressed hard, like TestCluster.FastOptions: a cluster that takes a second per pass to
                 // converge would dominate the run rather than be measured by it.
-                LoadReportInterval = TimeSpan.FromMilliseconds(100),
+                // Reports are normally faster than a reconcile pass here so a cluster converges quickly. A
+                // test about placement wants the production relation instead — the default is a report every
+                // two seconds against a pass every five, so a pass reads numbers that predate it.
+                LoadReportInterval = loadReportInterval ?? TimeSpan.FromMilliseconds(100),
                 LoadReportTtl = TimeSpan.FromSeconds(2),
                 ReconcileInterval = TimeSpan.FromMilliseconds(200),
                 GroupOptions = new RaftGroupOptions
@@ -185,6 +189,10 @@ internal sealed class ClusterTestCluster : IAsyncDisposable
             ? Path.Combine(Path.GetTempPath(), "blun-cluster-" + Guid.NewGuid().ToString("N"))
             : null;
 
+    /// <summary>How often each node pushes its load report, when the compressed default is not what is
+    /// being tested. Set before <see cref="AddNodesAsync(ulong[])"/>.</summary>
+    public TimeSpan? LoadReportInterval { get; init; }
+
     public ValueTask AddNodesAsync(params ulong[] ids) => AddNodesAsync(null, ids);
 
     /// <summary>
@@ -205,7 +213,8 @@ internal sealed class ClusterTestCluster : IAsyncDisposable
                 transport,
                 all,
                 stateMachine?.Invoke(id),
-                _root is null ? null : Path.Combine(_root, "node-" + id.ToString(CultureInfo.InvariantCulture)));
+                _root is null ? null : Path.Combine(_root, "node-" + id.ToString(CultureInfo.InvariantCulture)),
+                LoadReportInterval);
             _nodes.Add(node);
             await node.StartAsync();
         }
