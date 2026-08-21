@@ -165,6 +165,32 @@ public sealed class SegmentedRaftWal : IRaftWal
             return LastIndex;
         }
 
+        // Checked before the gate, for the whole batch at once (SEC-008): the single-entry overload above
+        // enforces MaxPayloadBytes, but this is the path replicated entries from a peer actually travel, and
+        // it enforced nothing. An oversized entry written here is accepted at the time, then rejected by
+        // WalSegment.RecoverAsync as torn on the next restart -- which truncates the log from that point on,
+        // discarding every committed entry after it. Checking the whole batch up front, not entry-by-entry
+        // as each is written, means a rejected batch never leaves a partial write behind.
+        //
+        // InvalidOperationException, not ArgumentException/ArgumentOutOfRangeException as the single-entry
+        // overload uses for its (locally-originated, not peer-reachable) callers: this batch is exactly what
+        // AppendEntries writes on the receive path, and RaftStreamSession.HandleRequestAsync's catch list
+        // (RpcException, InvalidOperationException, IOException) is what turns a rejection here into a
+        // logged, session-preserving failure instead of an unobserved exception in a fire-and-forget task.
+        foreach (RaftLogEntry entry in entries.Span)
+        {
+            if (entry.Payload.Length != entry.Header.PayloadLength)
+            {
+                throw new InvalidOperationException("Header payload length does not match the payload.");
+            }
+
+            if (entry.Payload.Length > _options.MaxPayloadBytes)
+            {
+                throw new InvalidOperationException(
+                    $"Payload of {entry.Payload.Length} bytes exceeds MaxPayloadBytes ({_options.MaxPayloadBytes}).");
+            }
+        }
+
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
