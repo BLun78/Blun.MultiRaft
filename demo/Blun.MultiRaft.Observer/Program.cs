@@ -61,14 +61,30 @@ app.MapGet("/api/cluster/stream", async (HttpContext context, ClusterWatcher wat
 
 // Everything below is the app host's control plane, reached through the observer so the UI has one origin
 // to talk to. The observer adds nothing here; it forwards.
-app.MapGet("/api/resources", async (IHttpClientFactory clients, ObserverOptions settings, CancellationToken token) =>
+// D-011: the app host is the one process the observer cannot demand anything of -- it may still be starting
+// when the UI makes its first call, and ClusterWatcher.PollResourcesAsync already treats that as ordinary.
+// These two proxying endpoints didn't, so an early request surfaced as a bare 500 and an empty page. 503
+// plus a reason lets the UI say "the app host isn't answering yet" instead of showing nothing.
+app.MapGet("/api/resources", async (
+    IHttpClientFactory clients,
+    ObserverOptions settings,
+    ILogger<Program> logger,
+    CancellationToken token) =>
 {
-    ResourceState[] states = await clients
-        .CreateClient("node")
-        .GetFromJsonAsync(new Uri(settings.ControlPlane, "/api/resources"), ObserverJson.Default.ResourceStateArray, token)
-        .ConfigureAwait(false) ?? [];
+    try
+    {
+        ResourceState[] states = await clients
+            .CreateClient("node")
+            .GetFromJsonAsync(new Uri(settings.ControlPlane, "/api/resources"), ObserverJson.Default.ResourceStateArray, token)
+            .ConfigureAwait(false) ?? [];
 
-    return Results.Json(states, ObserverJson.Default.ResourceStateArray);
+        return Results.Json(states, ObserverJson.Default.ResourceStateArray);
+    }
+    catch (HttpRequestException ex)
+    {
+        ObserverLog.ControlPlaneUnreachable(logger, ex.Message);
+        return Results.Problem("The app host is not answering yet.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 });
 
 app.MapPost("/api/resources/{name}/{command}", async (
@@ -76,6 +92,7 @@ app.MapPost("/api/resources/{name}/{command}", async (
     string command,
     IHttpClientFactory clients,
     ObserverOptions settings,
+    ILogger<Program> logger,
     CancellationToken token) =>
 {
     // SEC-009: name and command are route values, already URL-decoded by the time they get here, and were
@@ -94,24 +111,32 @@ app.MapPost("/api/resources/{name}/{command}", async (
         return Results.BadRequest($"Unknown command '{command}'.");
     }
 
-    using HttpResponseMessage response = await clients
-        .CreateClient("node")
-        .PostAsync(
-            new Uri(settings.ControlPlane, $"/api/resources/{Uri.EscapeDataString(name)}/{Uri.EscapeDataString(command)}"),
-            null,
-            token)
-        .ConfigureAwait(false);
-
-    if (!response.IsSuccessStatusCode)
+    try
     {
-        return Results.StatusCode((int)response.StatusCode);
+        using HttpResponseMessage response = await clients
+            .CreateClient("node")
+            .PostAsync(
+                new Uri(settings.ControlPlane, $"/api/resources/{Uri.EscapeDataString(name)}/{Uri.EscapeDataString(command)}"),
+                null,
+                token)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return Results.StatusCode((int)response.StatusCode);
+        }
+
+        CommandResult? result = await response.Content
+            .ReadFromJsonAsync(ObserverJson.Default.CommandResult, token)
+            .ConfigureAwait(false);
+
+        return Results.Json(result ?? new CommandResult(false, false, "no answer"), ObserverJson.Default.CommandResult);
     }
-
-    CommandResult? result = await response.Content
-        .ReadFromJsonAsync(ObserverJson.Default.CommandResult, token)
-        .ConfigureAwait(false);
-
-    return Results.Json(result ?? new CommandResult(false, false, "no answer"), ObserverJson.Default.CommandResult);
+    catch (HttpRequestException ex)
+    {
+        ObserverLog.ControlPlaneUnreachable(logger, ex.Message);
+        return Results.Problem("The app host is not answering yet.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 });
 
 // Every node's console output on one connection. One rather than five is not a tidiness preference: a

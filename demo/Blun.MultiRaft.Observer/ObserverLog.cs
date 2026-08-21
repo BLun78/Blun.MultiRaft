@@ -25,4 +25,10 @@ internal static partial class ObserverLog
         Level = LogLevel.Debug,
         Message = "The log stream for node {Node} dropped ({Reason}); reconnecting.")]
     public static partial void LogStreamDropped(ILogger logger, ulong node, string reason);
+
+    [LoggerMessage(
+        EventId = 2103,
+        Level = LogLevel.Warning,
+        Message = "The control plane did not answer a resource request ({Reason}).")]
+    public static partial void ControlPlaneUnreachable(ILogger logger, string reason);
 }
