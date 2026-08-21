@@ -77,6 +77,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     private bool _disposed;
     private int _compactionInFlight;
     private int _campaignInFlight;
+    private int _snapshotWriteInFlight;
 
     /// <summary>Creates a group instance. It does nothing until <see cref="StartAsync"/> is called.</summary>
     /// <remarks>
@@ -1500,19 +1501,44 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             return false;
         }
 
-        var metadata = new RaftSnapshotMetadata(upto, term, Membership.Serialize());
-        await _snapshots.WriteAsync(
-            Group,
-            metadata,
-            snapshotable.CaptureAsync(Group, upto, cancellationToken),
-            cancellationToken).ConfigureAwait(false);
+        // Shared with OnInstallSnapshotAsync: without it, a locally-triggered snapshot (this method, called
+        // directly or from MaybeStartAutoCompaction) can run at the same time as a received InstallSnapshot
+        // for the same group, and both write through RaftSnapshot.WriteAsync's staging file concurrently.
+        if (Interlocked.CompareExchange(ref _snapshotWriteInFlight, 1, 0) != 0)
+        {
+            return false;
+        }
 
-        await _wal.TruncateHeadAsync(upto, cancellationToken).ConfigureAwait(false);
-        Log.SnapshotTaken(_logger, Group.Value, upto, term);
-        return true;
+        try
+        {
+            var metadata = new RaftSnapshotMetadata(upto, term, Membership.Serialize());
+            await _snapshots.WriteAsync(
+                Group,
+                metadata,
+                snapshotable.CaptureAsync(Group, upto, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+
+            await _wal.TruncateHeadAsync(upto, cancellationToken).ConfigureAwait(false);
+            Log.SnapshotTaken(_logger, Group.Value, upto, term);
+            return true;
+        }
+        finally
+        {
+            Volatile.Write(ref _snapshotWriteInFlight, 0);
+        }
     }
 
     /// <summary>Handles an inbound <c>InstallSnapshot</c>.</summary>
+    /// <remarks>
+    /// <paramref name="body"/> is the network stream, and a snapshot is deliberately the one payload in this
+    /// system with no size bound -- GrpcRaftTransport sets no deadline on it for that reason. Holding
+    /// <see cref="_stateGate"/> for the whole transfer would therefore block every other request this group
+    /// answers (AppendEntries, RequestVote, an election) for however long the sender takes, which can be
+    /// unbounded: a slow or silent sender turns into a one-frame denial of service against this group alone.
+    /// The gate is instead taken twice -- once to decide whether to accept, once to apply the result -- with
+    /// the transfer itself running gate-free in between, guarded only by <see cref="_snapshotWriteInFlight"/>
+    /// against a concurrent local <see cref="TakeSnapshotAsync"/>.
+    /// </remarks>
     public async ValueTask<InstallSnapshotResponse> OnInstallSnapshotAsync(
         InstallSnapshotRequest request,
         IAsyncEnumerable<ReadOnlyMemory<byte>> body,
@@ -1542,12 +1568,27 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 return new InstallSnapshotResponse(_currentTerm, Success: true);
             }
 
-            if (_snapshots is null || _stateMachine is not IRaftSnapshotableStateMachine snapshotable)
+            if (_snapshots is null || _stateMachine is not IRaftSnapshotableStateMachine)
             {
                 await DrainAsync(body, cancellationToken).ConfigureAwait(false);
                 return new InstallSnapshotResponse(_currentTerm, Success: false);
             }
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
 
+        if (Interlocked.CompareExchange(ref _snapshotWriteInFlight, 1, 0) != 0)
+        {
+            // A locally-triggered snapshot write is already in progress for this group. Refuse rather than
+            // race it into RaftSnapshot's staging file; the leader will retry.
+            await DrainAsync(body, cancellationToken).ConfigureAwait(false);
+            return new InstallSnapshotResponse(_currentTerm, Success: false);
+        }
+
+        try
+        {
             var metadata = new RaftSnapshotMetadata(
                 request.LastIncludedIndex,
                 request.LastIncludedTerm,
@@ -1557,31 +1598,48 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             // recovery can finish the job; the other order could leave the state machine holding state that
             // nothing on disk accounts for.
             await _snapshots.WriteAsync(Group, metadata, body, cancellationToken).ConfigureAwait(false);
-            await snapshotable
-                .RestoreAsync(Group, _snapshots.ReadAsync(Group, cancellationToken), cancellationToken)
-                .ConfigureAwait(false);
 
-            await _wal.ResetToSnapshotAsync(request.LastIncludedIndex, request.LastIncludedTerm, cancellationToken)
-                .ConfigureAwait(false);
-
-            Volatile.Write(ref _commitIndex, request.LastIncludedIndex);
-            Volatile.Write(ref _lastApplied, request.LastIncludedIndex);
-
-            if (!request.Configuration.IsEmpty)
+            await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                // The configuration rides along because the log that carried membership changes has just been
-                // thrown away. Without it this replica could not learn who is in the group — including that
-                // it may no longer be in it itself.
-                Volatile.Write(ref _membership, RaftMembership.Deserialize(request.Configuration.Span));
-                Volatile.Write(ref _role, (int)(Membership.IsVoter(Self) ? RaftRole.Follower : RaftRole.Learner));
-            }
+                // Re-checked: term or commit index may have moved while the body was streaming gate-free.
+                if (request.Term < _currentTerm || request.LastIncludedIndex <= Volatile.Read(ref _commitIndex))
+                {
+                    return new InstallSnapshotResponse(_currentTerm, Success: false);
+                }
 
-            Log.SnapshotInstalled(_logger, Group.Value, request.Leader.Value, request.LastIncludedIndex);
-            return new InstallSnapshotResponse(_currentTerm, Success: true);
+                var snapshotable = (IRaftSnapshotableStateMachine)_stateMachine;
+                await snapshotable
+                    .RestoreAsync(Group, _snapshots.ReadAsync(Group, cancellationToken), cancellationToken)
+                    .ConfigureAwait(false);
+
+                await _wal
+                    .ResetToSnapshotAsync(request.LastIncludedIndex, request.LastIncludedTerm, cancellationToken)
+                    .ConfigureAwait(false);
+
+                Volatile.Write(ref _commitIndex, request.LastIncludedIndex);
+                Volatile.Write(ref _lastApplied, request.LastIncludedIndex);
+
+                if (!request.Configuration.IsEmpty)
+                {
+                    // The configuration rides along because the log that carried membership changes has just
+                    // been thrown away. Without it this replica could not learn who is in the group --
+                    // including that it may no longer be in it itself.
+                    Volatile.Write(ref _membership, RaftMembership.Deserialize(request.Configuration.Span));
+                    Volatile.Write(ref _role, (int)(Membership.IsVoter(Self) ? RaftRole.Follower : RaftRole.Learner));
+                }
+
+                Log.SnapshotInstalled(_logger, Group.Value, request.Leader.Value, request.LastIncludedIndex);
+                return new InstallSnapshotResponse(_currentTerm, Success: true);
+            }
+            finally
+            {
+                _stateGate.Release();
+            }
         }
         finally
         {
-            _stateGate.Release();
+            Volatile.Write(ref _snapshotWriteInFlight, 0);
         }
     }
 

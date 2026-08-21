@@ -137,7 +137,15 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
             return null;
         }
 
-        await using FileStream stream = File.OpenRead(path);
+        // FileShare.ReadWrite | FileShare.Delete, not File.OpenRead's plain FileShare.Read: this handle can
+        // stay open for as long as SendAsync streams the snapshot to a peer, and on Windows -- where
+        // FileShare is enforced rather than advisory -- a WriteAsync landing in the meantime would fail to
+        // File.Move over a path this store still has open for reading.
+        await using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
         byte[] header = new byte[RaftSnapshotMetadata.HeaderSize];
         if (await stream.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken)
                 .ConfigureAwait(false) < header.Length
@@ -176,7 +184,11 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
             yield break;
         }
 
-        await using FileStream stream = File.OpenRead(path);
+        await using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
         stream.Seek(RaftSnapshotMetadata.HeaderSize + metadata.Value.Configuration.Length, SeekOrigin.Begin);
 
         byte[] chunk = new byte[ChunkBytes];
@@ -200,30 +212,55 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
         CancellationToken cancellationToken = default)
     {
         string path = PathFor(group);
-        string staging = path + ".tmp";
 
-        await using (FileStream stream = File.Create(staging))
+        // A GUID, not a fixed ".tmp" suffix: the fixed name meant two concurrent writers for the same group
+        // -- TakeSnapshotAsync racing OnInstallSnapshotAsync, or two direct TakeSnapshotAsync calls -- wrote
+        // into the same file and interleaved their bytes. The corrupted result still passed the magic-header
+        // check and was moved into place as a "valid" snapshot. A unique name per write makes that
+        // structurally impossible; RaftGroupInstance additionally serializes writes per group.
+        string staging = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+
+        try
         {
-            byte[] header = new byte[RaftSnapshotMetadata.HeaderSize];
-            BinaryPrimitives.WriteUInt64LittleEndian(header, RaftSnapshotMetadata.Magic);
-            BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(8), metadata.LastIncludedIndex);
-            BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(16), metadata.LastIncludedTerm);
-            BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(24), metadata.Configuration.Length);
-
-            await stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
-            await stream.WriteAsync(metadata.Configuration, cancellationToken).ConfigureAwait(false);
-
-            await foreach (ReadOnlyMemory<byte> chunk in body.WithCancellation(cancellationToken).ConfigureAwait(false))
+            await using (FileStream stream = File.Create(staging))
             {
-                await stream.WriteAsync(chunk, cancellationToken).ConfigureAwait(false);
+                byte[] header = new byte[RaftSnapshotMetadata.HeaderSize];
+                BinaryPrimitives.WriteUInt64LittleEndian(header, RaftSnapshotMetadata.Magic);
+                BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(8), metadata.LastIncludedIndex);
+                BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(16), metadata.LastIncludedTerm);
+                BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(24), metadata.Configuration.Length);
+
+                await stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
+                await stream.WriteAsync(metadata.Configuration, cancellationToken).ConfigureAwait(false);
+
+                await foreach (ReadOnlyMemory<byte> chunk in body.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    await stream.WriteAsync(chunk, cancellationToken).ConfigureAwait(false);
+                }
+
+                stream.Flush(flushToDisk: true);
             }
 
-            stream.Flush(flushToDisk: true);
+            // The move is the commit point. Writing in place would leave a snapshot that looks complete but
+            // is not if the process died mid-write — and a replica would install it and silently lose state.
+            File.Move(staging, path, overwrite: true);
         }
+        catch
+        {
+            // The GUID name means this staging file is never referenced by anyone else, so an interrupted
+            // write can and should clean up after itself instead of leaving an orphan behind on every failed
+            // snapshot attempt.
+            try
+            {
+                File.Delete(staging);
+            }
+            catch (IOException)
+            {
+                // Best-effort cleanup; the original failure is what matters.
+            }
 
-        // The move is the commit point. Writing in place would leave a snapshot that looks complete but is
-        // not if the process died mid-write — and a replica would install it and silently lose state.
-        File.Move(staging, path, overwrite: true);
+            throw;
+        }
     }
 
     /// <inheritdoc />
