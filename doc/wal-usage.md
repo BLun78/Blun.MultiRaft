@@ -94,8 +94,17 @@ payload on its own.
 | | `InMemoryRaftWal` | `SegmentedRaftWal` |
 |---|---|---|
 | Survives a process restart | No | Yes |
-| Where state lives | A `List<RaftLogEntry>` | Segment files on disk |
+| Where state lives | An immutable snapshot (array + offset/count), swapped on write | Segment files on disk |
 | When to use it | Tests, transient/consumer-local groups | Anything whose durability you'd actually claim |
+
+`InMemoryRaftWal`'s reads (`ReadFromAsync`, `ReadHeadersFromAsync`, `TermAtAsync`, `LastIndex`, `LastTerm`,
+`FirstIndex`) never take a lock. Writers (appends and truncations) are serialized against each other by an
+internal gate — Raft only ever has one writer in flight per group anyway — and each write builds a new,
+fully-populated snapshot before publishing it with a single volatile write. A concurrent reader therefore
+either sees the snapshot from just before the write or just after, never a torn mix, without contending with
+the writer for a lock. Appending is O(1) amortized (new entries land in unused capacity of the same backing
+array before the snapshot publishing the higher count goes out); head truncation is O(1) too (it just moves
+the snapshot's offset/first-index forward instead of shifting elements).
 
 ```csharp
 IRaftWal volatileLog = new InMemoryRaftWal();
@@ -118,7 +127,7 @@ var options = new SegmentedRaftWalOptions
     FlushToDisk = true,                            // false only for tests/benchmarks -- see "Durability"
     SegmentAccess = WalSegmentAccess.RandomAccess,  // or .MemoryMapped for hot queues -- see below
     ChecksumAlgorithm = WalChecksumAlgorithm.XxHash3,
-    MaxPayloadBytes = SegmentedRaftWalOptions.MaxMessageBytes + SegmentedRaftWalOptions.EnvelopeHeadroomBytes,
+    MaxPayloadBytes = SegmentedRaftWalOptions.MaxMessageBytes, // default; the envelope headroom is added on top
     ScratchBufferBytes = 8 * 1024,
 };
 ```
@@ -132,9 +141,11 @@ var options = new SegmentedRaftWalOptions
   cheaper per append (see the benchmark numbers in the top-level README), but it reserves address space and
   page-table entries for as long as that segment is being written. With one log per queue, that cost is
   charged per group — turn it on for the specific queues that are actually hot, not as a blanket default.
-- **`MaxPayloadBytes`** defaults to 1024 KB (`MaxMessageBytes`) plus 16 KB of envelope headroom. This is a
-  hard ceiling — `AppendAsync` throws `ArgumentOutOfRangeException` above it — and it also bounds how large a
-  buffer the recovery scan will ever trust a corrupted length field to ask for.
+- **`MaxPayloadBytes`** defaults to 1024 KB (`MaxMessageBytes`) — that's the net message size a caller can
+  hand to `AppendAsync`. The actual on-disk record cap (`EffectiveMaxPayloadBytes`) is `MaxPayloadBytes` plus
+  `EnvelopeHeadroomBytes` (16 KB), room for whatever wraps the message on its way into a log record. That
+  effective cap is a hard ceiling — `AppendAsync` throws `ArgumentOutOfRangeException` above it — and it also
+  bounds how large a buffer the recovery scan will ever trust a corrupted length field to ask for.
 - **`ScratchBufferBytes`** is *not* sized to `MaxPayloadBytes`. It's the inline buffer used for ordinary
   appends (default 8 KB); anything larger transparently borrows from `ArrayPool<byte>.Shared` instead. Don't
   raise this to match your largest expected message — that cost is paid once per log, and with thousands of
