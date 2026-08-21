@@ -53,11 +53,20 @@ public sealed class SegmentedRaftWalOptions
     public WalChecksumAlgorithm ChecksumAlgorithm { get; init; } = WalChecksumAlgorithm.XxHash3;
 
     /// <summary>
-    /// Largest record payload accepted, defaulting to <see cref="MaxMessageBytes"/> plus
+    /// Largest net message this log accepts from its consumer, defaulting to <see cref="MaxMessageBytes"/>.
+    /// This is what the caller may hand to <see cref="IRaftWal.AppendAsync(RaftEntryHeader, ReadOnlyMemory{byte}, CancellationToken)"/> —
+    /// the record actually written
+    /// to disk is larger, because <see cref="EffectiveMaxPayloadBytes"/> adds <see cref="EnvelopeHeadroomBytes"/>
+    /// for whatever wraps the message on its way into a log record.
+    /// </summary>
+    public int MaxPayloadBytes { get; init; } = MaxMessageBytes;
+
+    /// <summary>
+    /// The actual on-disk record payload cap: <see cref="MaxPayloadBytes"/> plus
     /// <see cref="EnvelopeHeadroomBytes"/>. It also bounds the recovery scan's trust in a corrupt length
     /// field, which would otherwise ask for a multi-gigabyte buffer off a single flipped bit.
     /// </summary>
-    public int MaxPayloadBytes { get; init; } = MaxMessageBytes + EnvelopeHeadroomBytes;
+    internal int EffectiveMaxPayloadBytes => MaxPayloadBytes + EnvelopeHeadroomBytes;
 
     /// <summary>
     /// Size of the per-log buffer a single append is framed into. Appends larger than this borrow from the
@@ -80,7 +89,7 @@ public sealed class SegmentedRaftWalOptions
         }
 
         int checksumSize = WalChecksumStrategy.ChecksumSizeFor(ChecksumAlgorithm);
-        long largestRecord = RaftWalRecord.SizeOf(MaxPayloadBytes, checksumSize);
+        long largestRecord = RaftWalRecord.SizeOf(EffectiveMaxPayloadBytes, checksumSize);
         if (SegmentSizeBytes < largestRecord)
         {
             // A record that cannot fit a segment would roll forever without ever being written.

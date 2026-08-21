@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+/* The dark palette follows the operating system by default and can be overridden by the toggle in the
+   header, which puts .dark on <html>. Two sources for one decision, so the variant has to honour both. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+html {
+  color-scheme: light dark;
+}
+
+/* A log panel that scrolls should not drag its scrollbar's styling in from the host page. */
+.logs {
+  scrollbar-width: thin;
+}

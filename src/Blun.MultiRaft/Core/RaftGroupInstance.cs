@@ -184,7 +184,11 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             // node that had already been removed.
             await ReplayMembershipAsync(cancellationToken).ConfigureAwait(false);
 
-            Volatile.Write(ref _role, (int)(membership.IsVoter(Self) ? RaftRole.Follower : RaftRole.Learner));
+            // Read from the replayed configuration, not from the parameter. A node with history is handed an
+            // empty membership on purpose -- its log is what says who votes -- so deciding the role from the
+            // parameter makes every restarted node a learner. Learners never campaign, so a whole cluster
+            // coming back from disk would sit at its last term forever with nobody standing for election.
+            Volatile.Write(ref _role, (int)(Membership.IsVoter(Self) ? RaftRole.Follower : RaftRole.Learner));
             ArmElectionTimer();
             _started = true;
             Log.GroupStarted(_logger, Group.Value, Self.Value, _currentTerm, _wal.LastIndex);

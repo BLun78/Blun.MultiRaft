@@ -29,6 +29,7 @@ internal sealed class ClusterTestNode : IAsyncDisposable
     private readonly CancellationTokenSource _draining = new();
     private readonly string? _dataDirectory;
     private Task? _drain;
+    private bool _stopped;
 
     public ClusterTestNode(
         ulong id,
@@ -103,8 +104,16 @@ internal sealed class ClusterTestNode : IAsyncDisposable
     public static async ValueTask WaitUntilAsync(Func<bool> condition, string what, TimeSpan? timeout = null)
         => await TestCluster.WaitUntilAsync(condition, timeout ?? TimeSpan.FromSeconds(10), what);
 
-    public async ValueTask DisposeAsync()
+    /// <summary>Shuts the node down but leaves its data behind, so it can be started again over it.</summary>
+    public async ValueTask StopAsync()
     {
+        if (_stopped)
+        {
+            return;
+        }
+
+        _stopped = true;
+
         await _draining.CancelAsync();
         await Coordinator.DisposeAsync();
         await Host.DisposeAsync();
@@ -119,9 +128,16 @@ internal sealed class ClusterTestNode : IAsyncDisposable
             {
                 // Expected.
             }
+
+            _drain = null;
         }
 
         _draining.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
 
         if (_dataDirectory is not null && Directory.Exists(_dataDirectory))
         {
@@ -193,6 +209,25 @@ internal sealed class ClusterTestCluster : IAsyncDisposable
             _nodes.Add(node);
             await node.StartAsync();
         }
+    }
+
+    /// <summary>
+    /// Stops every node and starts it again over the same directories — the whole cluster coming back from
+    /// disk, which is a different path from a cold start: nobody seeds a cluster that already exists, so
+    /// every node is handed an empty configuration and has to rebuild the voter set from its own log.
+    /// </summary>
+    public async ValueTask RestartAllAsync()
+    {
+        ulong[] ids = [.. _nodes.Select(n => n.Self.Value)];
+
+        foreach (ClusterTestNode node in _nodes)
+        {
+            await node.StopAsync();
+            Network.Disconnect(node.Self);
+        }
+
+        _nodes.Clear();
+        await AddNodesAsync(ids);
     }
 
     public async ValueTask WaitForFormedAsync(TimeSpan? timeout = null)

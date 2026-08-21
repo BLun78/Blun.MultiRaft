@@ -13,6 +13,7 @@
   </Folder>
   <Folder Name="/demo/">
     <Project Path="demo/Blun.MultiRaft.Node/Blun.MultiRaft.Node.csproj" />
+    <Project Path="demo/Blun.MultiRaft.Observer/Blun.MultiRaft.Observer.csproj" />
     <Project Path="demo/Blun.MultiRaft.AppHost/Blun.MultiRaft.AppHost.csproj" />
   </Folder>
 </Solution>

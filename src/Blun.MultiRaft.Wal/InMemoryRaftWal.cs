@@ -17,49 +17,48 @@ namespace Blun.MultiRaft.Wal;
 /// implementation is a wrapper class, and the consensus core is only genuinely storage-agnostic if two
 /// unrelated stores satisfy the same test suite.
 /// </remarks>
+/// <remarks>
+/// Concurrency model: appends/truncations are serialized against each other by <c>_writeGate</c> (Raft only
+/// ever has one writer in flight per group), but readers never take a lock. Every mutation builds a new,
+/// fully-populated <see cref="LogState"/> snapshot and publishes it with a single <c>Volatile.Write</c>;
+/// readers grab the current snapshot with one <c>Volatile.Read</c> and index into it. Because the
+/// snapshot is only ever handed out after it is complete, a reader either sees the old state or the new one,
+/// never a torn mix — the array itself is append-only within a snapshot's lifetime (writer appends into the
+/// unused tail past <c>Count</c> before publishing the incremented count), so slots a published snapshot
+/// already claims are never mutated again.
+/// </remarks>
 public sealed class InMemoryRaftWal : IRaftWal
 {
     private readonly SemaphoreSlim _writeGate = new(1, 1);
-    private readonly List<RaftLogEntry> _entries = [];
+    private LogState _state = LogState.Empty;
 
-    private long _firstIndex = 1;
     private long _durableIndex;
 
-    // The index/term the log starts after, once a prefix was compacted away or replaced by a snapshot.
-    private long _baseIndex;
-    private long _baseTerm;
+    /// <inheritdoc />
+    public long FirstIndex => Volatile.Read(ref _state).FirstIndex;
 
     /// <inheritdoc />
-    public long FirstIndex => Volatile.Read(ref _firstIndex);
-
-    /// <inheritdoc />
-    public long LastIndex => FirstIndex + EntryCount - 1;
+    public long LastIndex
+    {
+        get
+        {
+            LogState state = Volatile.Read(ref _state);
+            return state.FirstIndex + state.Count - 1;
+        }
+    }
 
     /// <inheritdoc />
     public long LastTerm
     {
         get
         {
-            lock (_entries)
-            {
-                return _entries.Count > 0 ? _entries[^1].Term : Volatile.Read(ref _baseTerm);
-            }
+            LogState state = Volatile.Read(ref _state);
+            return state.Count > 0 ? state.Entries[state.Offset + state.Count - 1].Term : state.BaseTerm;
         }
     }
 
     /// <inheritdoc />
     public long DurableIndex => Volatile.Read(ref _durableIndex);
-
-    private int EntryCount
-    {
-        get
-        {
-            lock (_entries)
-            {
-                return _entries.Count;
-            }
-        }
-    }
 
     /// <inheritdoc />
     public async ValueTask<long> AppendAsync(
@@ -70,15 +69,13 @@ public sealed class InMemoryRaftWal : IRaftWal
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            EnsureDense(header.Index);
+            LogState state = _state;
+            EnsureDense(state, header.Index);
 
             // Copied on the way in: the caller's buffer is a slice of a socket read and is recycled the
             // moment this returns, which is exactly the lifetime bug a volatile store invites.
             var entry = new RaftLogEntry(in header, payload.ToArray());
-            lock (_entries)
-            {
-                _entries.Add(entry);
-            }
+            Volatile.Write(ref _state, state.Appended(entry));
 
             return header.Index;
         }
@@ -101,14 +98,15 @@ public sealed class InMemoryRaftWal : IRaftWal
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            EnsureDense(entries.Span[0].Index);
-            lock (_entries)
+            LogState state = _state;
+            EnsureDense(state, entries.Span[0].Index);
+
+            for (int i = 0; i < entries.Length; i++)
             {
-                for (int i = 0; i < entries.Length; i++)
-                {
-                    _entries.Add(entries.Span[i].ToOwned());
-                }
+                state = state.Appended(entries.Span[i].ToOwned());
             }
+
+            Volatile.Write(ref _state, state);
 
             return entries.Span[^1].Index;
         }
@@ -122,9 +120,9 @@ public sealed class InMemoryRaftWal : IRaftWal
     /// Rejects a gap. The consistency check assumes a dense index space, so a hole would not fail loudly —
     /// it would quietly make the check compare the wrong entries.
     /// </summary>
-    private void EnsureDense(long index)
+    private static void EnsureDense(LogState state, long index)
     {
-        long expected = LastIndex + 1;
+        long expected = state.FirstIndex + state.Count;
         if (index != expected)
         {
             throw new InvalidOperationException(
@@ -147,18 +145,17 @@ public sealed class InMemoryRaftWal : IRaftWal
             return ValueTask.FromResult(0L);
         }
 
+        LogState state = Volatile.Read(ref _state);
+
         // The boundary index answers for itself even though its entry is gone: the next AppendEntries
         // runs its consistency check against exactly that point.
-        if (index == Volatile.Read(ref _baseIndex))
+        if (index == state.BaseIndex)
         {
-            return ValueTask.FromResult(Volatile.Read(ref _baseTerm));
+            return ValueTask.FromResult(state.BaseTerm);
         }
 
-        lock (_entries)
-        {
-            int slot = (int)(index - _firstIndex);
-            return ValueTask.FromResult((uint)slot < (uint)_entries.Count ? _entries[slot].Term : -1L);
-        }
+        int slot = (int)(index - state.FirstIndex);
+        return ValueTask.FromResult((uint)slot < (uint)state.Count ? state.Entries[state.Offset + slot].Term : -1L);
     }
 
     /// <inheritdoc />
@@ -167,22 +164,17 @@ public sealed class InMemoryRaftWal : IRaftWal
         long toIndexInclusive,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        for (long index = Math.Max(fromIndex, FirstIndex); index <= toIndexInclusive; index++)
+        LogState state = Volatile.Read(ref _state);
+        for (long index = Math.Max(fromIndex, state.FirstIndex); index <= toIndexInclusive; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            RaftLogEntry entry;
-            lock (_entries)
+            int slot = (int)(index - state.FirstIndex);
+            if ((uint)slot >= (uint)state.Count)
             {
-                int slot = (int)(index - _firstIndex);
-                if ((uint)slot >= (uint)_entries.Count)
-                {
-                    yield break;
-                }
-
-                entry = _entries[slot];
+                yield break;
             }
 
-            yield return entry;
+            yield return state.Entries[state.Offset + slot];
         }
 
         await ValueTask.CompletedTask.ConfigureAwait(false);
@@ -194,22 +186,17 @@ public sealed class InMemoryRaftWal : IRaftWal
         long toIndexInclusive,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        for (long index = Math.Max(fromIndex, FirstIndex); index <= toIndexInclusive; index++)
+        LogState state = Volatile.Read(ref _state);
+        for (long index = Math.Max(fromIndex, state.FirstIndex); index <= toIndexInclusive; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            RaftEntryHeader header;
-            lock (_entries)
+            int slot = (int)(index - state.FirstIndex);
+            if ((uint)slot >= (uint)state.Count)
             {
-                int slot = (int)(index - _firstIndex);
-                if ((uint)slot >= (uint)_entries.Count)
-                {
-                    yield break;
-                }
-
-                header = _entries[slot].Header;
+                yield break;
             }
 
-            yield return header;
+            yield return state.Entries[state.Offset + slot].Header;
         }
 
         await ValueTask.CompletedTask.ConfigureAwait(false);
@@ -221,16 +208,14 @@ public sealed class InMemoryRaftWal : IRaftWal
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            lock (_entries)
+            LogState state = _state;
+            int slot = (int)(fromIndex - state.FirstIndex);
+            if (slot < 0 || slot >= state.Count)
             {
-                int slot = (int)(fromIndex - _firstIndex);
-                if (slot < 0 || slot >= _entries.Count)
-                {
-                    return;
-                }
-
-                _entries.RemoveRange(slot, _entries.Count - slot);
+                return;
             }
+
+            Volatile.Write(ref _state, state.WithCount(slot));
 
             if (_durableIndex > fromIndex - 1)
             {
@@ -249,25 +234,19 @@ public sealed class InMemoryRaftWal : IRaftWal
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            lock (_entries)
+            LogState state = _state;
+            int drop = (int)(uptoIndexInclusive - state.FirstIndex + 1);
+            if (drop <= 0)
             {
-                int drop = (int)(uptoIndexInclusive - _firstIndex + 1);
-                if (drop <= 0)
-                {
-                    return;
-                }
-
-                drop = Math.Min(drop, _entries.Count);
-
-                // Capture the boundary before dropping it, for the same reason the segmented log does:
-                // the compacted log still has to answer the consistency check at its own starting point.
-                RaftLogEntry boundary = _entries[drop - 1];
-                Volatile.Write(ref _baseIndex, boundary.Index);
-                Volatile.Write(ref _baseTerm, boundary.Term);
-
-                _entries.RemoveRange(0, drop);
-                Volatile.Write(ref _firstIndex, _firstIndex + drop);
+                return;
             }
+
+            drop = Math.Min(drop, state.Count);
+
+            // Capture the boundary before dropping it, for the same reason the segmented log does:
+            // the compacted log still has to answer the consistency check at its own starting point.
+            RaftLogEntry boundary = state.Entries[state.Offset + drop - 1];
+            Volatile.Write(ref _state, state.WithHeadDropped(drop, boundary.Index, boundary.Term));
         }
         finally
         {
@@ -284,14 +263,7 @@ public sealed class InMemoryRaftWal : IRaftWal
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            lock (_entries)
-            {
-                _entries.Clear();
-            }
-
-            Volatile.Write(ref _firstIndex, lastIncludedIndex + 1);
-            Volatile.Write(ref _baseIndex, lastIncludedIndex);
-            Volatile.Write(ref _baseTerm, lastIncludedTerm);
+            Volatile.Write(ref _state, LogState.EmptyAt(lastIncludedIndex, lastIncludedTerm));
 
             // A snapshot is durable by the time it is installed, so everything it covers is durable too.
             Volatile.Write(ref _durableIndex, lastIncludedIndex);
@@ -306,12 +278,99 @@ public sealed class InMemoryRaftWal : IRaftWal
     public ValueTask DisposeAsync()
     {
         _writeGate.Dispose();
-        lock (_entries)
+        Volatile.Write(ref _state, LogState.Empty);
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Immutable-once-published snapshot of the log's live window. <see cref="Entries"/> may have unused
+    /// capacity past <see cref="Offset"/> + <see cref="Count"/> — that tail belongs to whichever writer built
+    /// this snapshot and is only ever written into before being handed to a *new* snapshot via
+    /// <see cref="Appended"/>; a snapshot already published to readers never has its claimed slots mutated.
+    /// </summary>
+    private sealed class LogState
+    {
+        public required RaftLogEntry[] Entries { get; init; }
+
+        public required int Offset { get; init; }
+
+        public required int Count { get; init; }
+
+        public required long FirstIndex { get; init; }
+
+        public required long BaseIndex { get; init; }
+
+        public required long BaseTerm { get; init; }
+
+        public static LogState Empty { get; } = new()
         {
-            _entries.Clear();
+            Entries = [],
+            Offset = 0,
+            Count = 0,
+            FirstIndex = 1,
+            BaseIndex = 0,
+            BaseTerm = 0,
+        };
+
+        public static LogState EmptyAt(long lastIncludedIndex, long lastIncludedTerm) => new()
+        {
+            Entries = [],
+            Offset = 0,
+            Count = 0,
+            FirstIndex = lastIncludedIndex + 1,
+            BaseIndex = lastIncludedIndex,
+            BaseTerm = lastIncludedTerm,
+        };
+
+        public LogState Appended(RaftLogEntry entry)
+        {
+            RaftLogEntry[] array = Entries;
+            int offset = Offset;
+
+            if (offset + Count >= array.Length)
+            {
+                // Compact the live window into a fresh array sized for future growth. Only the writer
+                // (serialized by _writeGate) ever sees this array before it is published, so writing into
+                // it here and publishing the new snapshot afterwards is race-free for readers.
+                int newCapacity = Math.Max(4, Count * 2);
+                var compacted = new RaftLogEntry[newCapacity];
+                Array.Copy(array, offset, compacted, 0, Count);
+                array = compacted;
+                offset = 0;
+            }
+
+            array[offset + Count] = entry;
+
+            return new LogState
+            {
+                Entries = array,
+                Offset = offset,
+                Count = Count + 1,
+                FirstIndex = FirstIndex,
+                BaseIndex = BaseIndex,
+                BaseTerm = BaseTerm,
+            };
         }
 
-        return ValueTask.CompletedTask;
+        public LogState WithCount(int newCount) => new()
+        {
+            Entries = Entries,
+            Offset = Offset,
+            Count = newCount,
+            FirstIndex = FirstIndex,
+            BaseIndex = BaseIndex,
+            BaseTerm = BaseTerm,
+        };
+
+        public LogState WithHeadDropped(int drop, long boundaryIndex, long boundaryTerm) => new()
+        {
+            Entries = Entries,
+            Offset = Offset + drop,
+            Count = Count - drop,
+            FirstIndex = FirstIndex + drop,
+            BaseIndex = boundaryIndex,
+            BaseTerm = boundaryTerm,
+        };
     }
 }
 

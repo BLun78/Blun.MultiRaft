@@ -123,7 +123,7 @@ public sealed class SegmentedRaftWal : IRaftWal
             throw new ArgumentException("Header payload length does not match the payload.", nameof(payload));
         }
 
-        if (payload.Length > _options.MaxPayloadBytes)
+        if (payload.Length > _options.EffectiveMaxPayloadBytes)
         {
             throw new ArgumentOutOfRangeException(nameof(payload), payload.Length, "Payload exceeds MaxPayloadBytes.");
         }
