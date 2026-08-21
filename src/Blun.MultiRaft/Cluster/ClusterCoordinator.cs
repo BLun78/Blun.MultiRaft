@@ -357,9 +357,37 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         return new ClusterLoadSnapshot(nodes, Self);
     }
 
+    /// <summary>
+    /// Removes load entries older than <see cref="ClusterOptions.LoadReportTtl"/>. <see cref="GetLoad"/> and
+    /// <see cref="OrderCandidates"/> already filter stale entries out when reading, but neither one ever
+    /// shrinks <see cref="_load"/> itself -- a node that leaves the cluster, or an unauthenticated sender
+    /// reporting under a since-removed node id, would otherwise sit in memory forever.
+    /// </summary>
+    private void PurgeExpiredLoad()
+    {
+        long now = _time.GetTimestamp();
+        foreach (LoadEntry entry in _load.Values)
+        {
+            if (ElapsedSince(entry.Timestamp, now) > _options.LoadReportTtl)
+            {
+                _load.TryRemove(entry.Node, out _);
+            }
+        }
+    }
+
     /// <inheritdoc />
     public ValueTask OnLoadReportAsync(NodeLoadReport report, CancellationToken cancellationToken = default)
     {
+        // Reject reports about a node this cluster does not know. Without this check, any sender -- and the
+        // Raft transport authenticates none of them today -- can grow _load without bound simply by reporting
+        // under fabricated node ids, since nothing here ever removes an entry.
+        bool known = _options.EffectiveNodes.Contains(report.Node)
+            || (_group is { } group && group.Membership.AllMembers.Contains(report.Node));
+        if (!known)
+        {
+            return ValueTask.CompletedTask;
+        }
+
         long now = _time.GetTimestamp();
         _load.AddOrUpdate(
             report.Node,
@@ -586,6 +614,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
                 {
                     await ReportLoadAsync().ConfigureAwait(false);
                     PublishStateChange();
+                    PurgeExpiredLoad();
 
                     long now = _time.GetTimestamp();
                     if (now >= nextReconcile)
