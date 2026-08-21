@@ -30,9 +30,6 @@ dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.d
 dotnet run --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -c Release -f net11.0 -- --runtimes net10.0 net11.0
 dotnet run -c Release --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -- --filter "*WalAppend*"
 
-# The gRPC multiplexing benchmark is a plain console harness, not BenchmarkDotNet
-dotnet run -c Release --project benchmark/Blun.MultiRaft.Grpc.Benchmarks/Blun.MultiRaft.Grpc.Benchmarks.csproj
-
 # Aspire demo: five nodes, real gRPC, /status on 8101-8105, observer UI on 4200
 # (control plane 8200, observer API 8300; delete demo/Blun.MultiRaft.AppHost/data/ first)
 dotnet run --project demo/Blun.MultiRaft.AppHost/Blun.MultiRaft.AppHost.csproj
@@ -134,9 +131,11 @@ Inside `src/Blun.MultiRaft`:
   The cluster group is ticked first, ahead of the queue groups sharing that loop.
 - **gRPC transport multiplexes by hand**: one bidirectional stream per node pair carries every group
   (group id + correlation id in the frame), instead of one HTTP/2 stream per group. NOTE: the latency
-  argument for this (avoiding thousands of streams' flow-control/HPACK overhead) was benchmarked in
-  `benchmark/Blun.MultiRaft.Grpc.Benchmarks` and **did not hold up** — per-group streams were at or faster
-  than multiplexed in steady state at every scale measured. The design is kept anyway for connection-setup
+  argument for this (avoiding thousands of streams' flow-control/HPACK overhead) was measured once, in a
+  console harness that has since been deleted, and **did not hold up** — per-group streams were at or faster
+  than multiplexed in steady state from roughly five hundred groups upward. Those numbers survive only as the
+  table in README.md; nothing in this tree reproduces them, so re-opening the question means rebuilding the
+  harness first. The design is kept anyway for connection-setup
   cost (real, scales with group count) and an unmeasured resource-footprint question (thousands of concurrent
   OS-level connections). Don't cite the latency argument as settled fact; see README.md for the numbers.
 - **`ReadIndexAsync` (Raft §6.4)** gives linearizable reads without a log append: the leader confirms

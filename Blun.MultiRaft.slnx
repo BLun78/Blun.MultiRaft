@@ -9,7 +9,6 @@
   </Folder>
   <Folder Name="/benchmark/">
     <Project Path="benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj" />
-    <Project Path="benchmark/Blun.MultiRaft.Grpc.Benchmarks/Blun.MultiRaft.Grpc.Benchmarks.csproj" />
   </Folder>
   <Folder Name="/demo/">
     <Project Path="demo/Blun.MultiRaft.Node/Blun.MultiRaft.Node.csproj" />

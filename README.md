@@ -203,9 +203,10 @@ against.
 `Blun.MultiRaft.Grpc` puts *one* bidirectional stream between each pair of nodes and carries every group over
 it, with the group id in the frame and a correlation id pairing replies to requests. The reasoning for this
 over a stream per group was that each of thousands of separate HTTP/2 streams carries its own flow-control
-window and HPACK state, and `benchmark/Blun.MultiRaft.Grpc.Benchmarks` was built to check that reasoning
-against the alternative — the same gRPC stack, but one dedicated stream per group — with a listener that
-answers instantly, so what is measured is transport overhead alone.
+window and HPACK state. A console harness was built to check that reasoning against the alternative — the
+same gRPC stack, but one dedicated stream per group — with a listener that answers instantly, so what was
+measured is transport overhead alone. That harness has since been deleted from the tree; the numbers below
+are the record it left, and reproducing or extending them means building it again.
 
 It does not confirm the latency claim. Concurrent round trips across many groups, steady-state (connection
 setup measured and excluded):
@@ -226,11 +227,11 @@ request: this does not rule out the effect showing up on a real network, with re
 2000 groups, but it means the HPACK/flow-control argument is not a demonstrated fact the way the WAL numbers
 above are. It is exactly what it was called then — an argument — and should be described that way.
 
-Two things this benchmark does show, and that motivate keeping the multiplexed design regardless: connection
+Two things the measurement does show, and that motivate keeping the multiplexed design regardless: connection
 *setup* cost is real, scales with group count, and is now the dominant term rather than a footnote — 4.3 s to
 open 2000 channels against 122 ms of steady-state work, so setup costs thirty-five times what the round trips
 it enables do. It recurs every time a per-group connection needs re-establishing, where the multiplexed
-session amortizes it once per node pair. And this benchmark does not measure the
+session amortizes it once per node pair. And the measurement never covered the
 separate, likely more important claim at real scale: whether a node can hold thousands of concurrent TCP
 connections and HTTP/2 stream objects open at all without hitting OS-level resource limits — a question about
 survivability under load, not about the latency of any single round trip. That question remains unmeasured
