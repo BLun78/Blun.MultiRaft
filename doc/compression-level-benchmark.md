@@ -52,6 +52,29 @@ Heuristik.
 (Compress + Append + Flush) bei akzeptabler Kompressionsrate ablesen und daraus eine Tabelle
 "Payload-Größenbereich → empfohlenes Level" ableiten.
 
+## Ergänzung: LZ4Stream vs. LZ4Frame vs. LZ4Pickler
+
+Zusätzliche Achse `CompressionApi` (`Pickler, Stream, Frame`) über dieselbe Größen-/Level-/Inhaltsmatrix, um
+zu klären, ab welcher Payload-Größe (falls überhaupt) `LZ4Stream` oder `LZ4Frame` gegenüber dem bisher
+verwendeten `LZ4Pickler` (One-Shot-Block-Format) einen Unterschied machen — und welche der drei API-Varianten
+gewinnt.
+
+- **`Pickler`** (`LZ4Pickler.Pickle`) — bisherige Baseline, ein Aufruf, eine Allokation, bespoke Block-Format.
+- **`Stream`** (`LZ4Stream.Encode(Stream, level, extraMemory, leaveOpen)`) — Chunked-Encoder über einen
+  `MemoryStream`; zahlt die `Stream`-Abstraktion (virtuelle Aufrufe, internes Buffering) mit. Die API, die
+  gebraucht würde, wenn ein Payload nicht mehr in einen zusammenhängenden Span passt.
+- **`Frame`** (`LZ4Frame.Encode(Span<byte>, Span<byte>, level, extraMemory)`) — Span-zu-Span, kein `Stream`
+  im Pfad, gleiches LZ4-Frame-Format (selbstbeschreibend, mit Checksums) wie `Stream`. Direktester Fit für
+  einen WAL-Eintrag, der schon als ein zusammenhängender Span vorliegt.
+
+`None` läuft der Einfachheit halber unter allen drei API-Werten identisch mit (kein Kompressionsaufruf) —
+das ist redundant, aber günstig, und dient nebenbei als Sanity-Check: alle drei sollten innerhalb der
+Messtoleranz gleich schnell sein.
+
+**Scope-Hinweis:** Gemessen wird nur der Schreibpfad (Compress → Append → Flush), kein Round-Trip/Decode —
+konsistent mit dem ursprünglichen Benchmark-Ziel ("Performance geht über alles beim WAL", also der Pfad, den
+ein Aufrufer tatsächlich abwartet).
+
 ## Ergebnis
 
 _(wird nach dem Benchmark-Lauf ergänzt)_
