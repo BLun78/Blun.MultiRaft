@@ -17,14 +17,14 @@
     <PackageVersion Include="Grpc.Net.Client" Version="2.83.0" />
   </ItemGroup>
   <ItemGroup Label="Transitive pins">
-    <!-- Aspire 13.4 pulls MessagePack 2.5.192, which carries several published advisories
+    <!-- Aspire 13.5.1 pulls MessagePack 2.5.192, which carries several published advisories
          (GHSA-hv8m-jj95-wg3x among them). Pinned forward rather than suppressed: the build treats
          vulnerability warnings as errors on purpose, and silencing them would make the next one invisible. -->
     <PackageVersion Include="MessagePack" Version="3.1.8" />
   </ItemGroup>
   <ItemGroup Label="Aspire">
-    <PackageVersion Include="Aspire.Hosting.AppHost" Version="13.4.6" />
-    <PackageVersion Include="Aspire.Hosting.JavaScript" Version="13.4.6" />
+    <PackageVersion Include="Aspire.Hosting.AppHost" Version="13.5.1" />
+    <PackageVersion Include="Aspire.Hosting.JavaScript" Version="13.5.1" />
   </ItemGroup>
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
