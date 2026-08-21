@@ -44,6 +44,7 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
     private MessageSender? _sender;
     private Task? _events;
     private CancellationTokenSource? _stopping;
+    private IRaftSnapshotStore? _snapshots;
 
     /// <summary>The last few cluster events, so the dashboard can show that the plane is doing something.</summary>
     private readonly Queue<string> _recentEvents = new();
@@ -87,6 +88,7 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
         IRaftSnapshotStore snapshots = string.IsNullOrWhiteSpace(_dataDirectory)
             ? new InMemoryRaftSnapshotStore()
             : new FileRaftSnapshotStore(Path.Combine(_dataDirectory, "snapshots"));
+        _snapshots = snapshots;
 
         _host = new MultiRaftHost(
             _self,
@@ -291,6 +293,55 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
         };
     }
 
+    /// <summary>
+    /// What this node's stored snapshot for a group looks like, or <see langword="null"/> when it has none.
+    /// Size is measured off the snapshot file the same way <see cref="MeasureWal"/> measures the log — the
+    /// metadata itself carries no byte count, only the log position the snapshot stands for.
+    /// </summary>
+    private async ValueTask<object?> DescribeSnapshotAsync(RaftGroupId group)
+    {
+        if (_snapshots is null)
+        {
+            return null;
+        }
+
+        RaftSnapshotMetadata? metadata = await _snapshots.ReadMetadataAsync(group).ConfigureAwait(false);
+        if (metadata is null)
+        {
+            return null;
+        }
+
+        return new
+        {
+            lastIncludedIndex = metadata.Value.LastIncludedIndex,
+            lastIncludedTerm = metadata.Value.LastIncludedTerm,
+            sizeBytes = MeasureSnapshotFile(group),
+        };
+    }
+
+    private long MeasureSnapshotFile(RaftGroupId group)
+    {
+        if (string.IsNullOrWhiteSpace(_dataDirectory))
+        {
+            return 0;
+        }
+
+        string path = Path.Combine(
+            _dataDirectory,
+            "snapshots",
+            "g" + group.Value.ToString("D20", CultureInfo.InvariantCulture) + ".snap");
+
+        try
+        {
+            return File.Exists(path) ? new FileInfo(path).Length : 0;
+        }
+        catch (IOException)
+        {
+            // A snapshot being swapped in underneath the walk is not worth failing a status request over.
+            return 0;
+        }
+    }
+
     private (long Bytes, int Files) MeasureWal(RaftGroupId group)
     {
         if (string.IsNullOrWhiteSpace(_dataDirectory))
@@ -372,8 +423,11 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
     }
 
     /// <summary>A snapshot of what this node believes, for the dashboard and for the scenario's assertions.</summary>
-    public object Describe()
-        => new
+    public async ValueTask<object> DescribeAsync()
+    {
+        object?[] groupDescriptions = await Task.WhenAll(Groups.Select(DescribeGroupAsync)).ConfigureAwait(false);
+
+        return new
         {
             node = _self.Value.ToString(CultureInfo.InvariantCulture),
             cluster = new
@@ -388,47 +442,58 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
                 // The administrative group's own Raft state, shaped exactly like a queue group's entry
                 // below. It is a Raft group like any other and reading it next to them is the point --
                 // "the cluster is fine" and "the group that decides that is fine" are separate claims.
-                group = DescribeClusterGroup(),
+                group = await DescribeClusterGroupAsync().ConfigureAwait(false),
                 recentEvents = RecentEvents(),
             },
-            groups = Groups.Select(group =>
-            {
-                if (_host is null || !_host.TryGetGroup(group, out RaftGroupInstance? instance) || instance is null)
-                {
-                    // The log is still measured: a group this node has not opened may well have segments on
-                    // disk from before it was restarted, and that is worth seeing rather than hiding.
-                    return new
-                    {
-                        group = group.Value,
-                        role = "unknown",
-                        term = 0L,
-                        leader = (string?)null,
-                        commitIndex = 0L,
-                        wal = DescribeWal(group, null),
-                        send = DescribeSend(group.Value),
-                    };
-                }
-
-                return new
-                {
-                    group = group.Value,
-                    role = instance.Role.ToString(),
-                    term = instance.CurrentTerm,
-                    leader = instance.LeaderId?.Value.ToString(CultureInfo.InvariantCulture),
-                    commitIndex = instance.CommitIndex,
-                    wal = DescribeWal(group, instance),
-                    send = DescribeSend(group.Value),
-                };
-            }).ToArray(),
+            groups = groupDescriptions,
         };
+    }
 
-    private object? DescribeClusterGroup()
+    private async Task<object> DescribeGroupAsync(RaftGroupId group)
+    {
+        object? snapshot = await DescribeSnapshotAsync(group).ConfigureAwait(false);
+
+        if (_host is null || !_host.TryGetGroup(group, out RaftGroupInstance? instance) || instance is null)
+        {
+            // The log is still measured: a group this node has not opened may well have segments on
+            // disk from before it was restarted, and that is worth seeing rather than hiding.
+            return new
+            {
+                group = group.Value,
+                role = "unknown",
+                term = 0L,
+                leader = (string?)null,
+                commitIndex = 0L,
+                wal = DescribeWal(group, null),
+                snapshot,
+                send = DescribeSend(group.Value),
+            };
+        }
+
+        return new
+        {
+            group = group.Value,
+            role = instance.Role.ToString(),
+            term = instance.CurrentTerm,
+            leader = instance.LeaderId?.Value.ToString(CultureInfo.InvariantCulture),
+            commitIndex = instance.CommitIndex,
+            wal = DescribeWal(group, instance),
+            snapshot,
+            send = DescribeSend(group.Value),
+        };
+    }
+
+    private async ValueTask<object?> DescribeClusterGroupAsync()
     {
         RaftGroupInstance? instance = _cluster?.Group;
+        if (instance is null)
+        {
+            return null;
+        }
 
-        return instance is null
-            ? null
-            : new
+        object? snapshot = await DescribeSnapshotAsync(RaftGroupId.Cluster).ConfigureAwait(false);
+
+        return new
             {
                 group = RaftGroupId.Cluster.Value,
                 role = instance.Role.ToString(),
@@ -436,6 +501,7 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
                 leader = instance.LeaderId?.Value.ToString(CultureInfo.InvariantCulture),
                 commitIndex = instance.CommitIndex,
                 wal = DescribeWal(RaftGroupId.Cluster, instance),
+                snapshot,
                 send = DescribeSend(RaftGroupId.Cluster.Value),
             };
     }

@@ -31,6 +31,7 @@ internal sealed record NodeGroupStatus(
     string? Leader,
     long CommitIndex,
     WalStatus? Wal,
+    SnapshotStatus? Snapshot,
     SendStatus? Send);
 
 /// <summary>What a node's copy of one group's log costs on disk, and what is in it.</summary>
@@ -41,6 +42,16 @@ internal sealed record WalStatus(
     long LastIndex,
     long Entries,
     long BytesPerEntry);
+
+/// <summary>
+/// What a node's stored snapshot for one group looks like. Absent (<see langword="null"/> on the wire)
+/// when the group has never taken one — that is the common case in this demo, since none of its groups
+/// register a snapshotable state machine.
+/// </summary>
+internal sealed record SnapshotStatus(
+    long LastIncludedIndex,
+    long LastIncludedTerm,
+    long SizeBytes);
 
 /// <summary>A run of generated traffic, as the node carrying it reports it.</summary>
 internal sealed record SendStatus(
@@ -123,7 +134,8 @@ internal sealed record GroupCell(
     long Term,
     string? Leader,
     long CommitIndex,
-    WalStatus? Wal);
+    WalStatus? Wal,
+    SnapshotStatus? Snapshot);
 
 internal sealed record CommandResult(bool Success, bool Canceled, string? Message);
 

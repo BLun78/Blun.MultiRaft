@@ -124,7 +124,7 @@ app.Use(async (context, next) =>
 app.MapGrpcService<RaftProtocolService>();
 
 // The whole point of the scenario: watch three nodes agree on one leader, over a real network.
-app.MapGet("/status", (RaftNodeHost host) => Results.Json(host.Describe()));
+app.MapGet("/status", async (RaftNodeHost host) => Results.Json(await host.DescribeAsync()));
 
 // What the cluster leader believes each node is carrying. Empty on the other two, which is the honest
 // answer -- reports are pushed to the leader and nobody else has a picture to offer.

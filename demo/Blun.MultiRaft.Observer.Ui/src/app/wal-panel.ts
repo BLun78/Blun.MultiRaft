@@ -15,7 +15,9 @@ const BATCHES = [100, 1000, 10000] as const;
         Bytes as the filesystem holds them, per node, segments included — not a count of what was appended.
         Sending writes real commands through the group's leader, so every follower's log grows with it. The
         pacing is <em>at most</em> one every 10&nbsp;ms: each append waits for its commit, so the rate shown
-        is what a replicated round trip actually costs, not what was asked for.
+        is what a replicated round trip actually costs, not what was asked for. A snapshot line appears
+        under a node's log only once that node has actually stored one for the group — none of this demo's
+        groups compact automatically, so it stays empty unless a snapshot was installed from a peer.
       </p>
 
       <table class="w-full min-w-[52rem] border-collapse text-sm">
@@ -42,6 +44,12 @@ const BATCHES = [100, 1000, 10000] as const;
                     no log yet
                   }
                 </div>
+                @if (leaderSnapshot(group); as snapshot) {
+                  <div class="text-xs text-sky-600 dark:text-sky-400">
+                    snapshot @ {{ snapshot.lastIncludedIndex }} (term {{ snapshot.lastIncludedTerm }}) ·
+                    {{ bytes(snapshot.sizeBytes) }}
+                  </div>
+                }
               </td>
 
               @for (cell of group.cells; track cell.node) {
@@ -56,6 +64,14 @@ const BATCHES = [100, 1000, 10000] as const;
                     </div>
                   } @else {
                     <span class="text-neutral-400">—</span>
+                  }
+
+                  @if (cell.snapshot; as snapshot) {
+                    <div [attr.data-testid]="'snapshot-' + group.group + '-node-' + cell.node"
+                         class="mt-0.5 font-mono text-[11px] text-sky-600 dark:text-sky-400">
+                      snap @ {{ snapshot.lastIncludedIndex }}
+                      <span class="text-neutral-400 dark:text-neutral-600">({{ bytes(snapshot.sizeBytes) }})</span>
+                    </div>
                   }
                 </td>
               }
@@ -127,6 +143,11 @@ export class WalPanel {
   /** The log of whichever node leads the group — the one the sending goes through. */
   leaderWal(group: GroupView) {
     return group.cells.find((cell: GroupCell) => cell.role === 'Leader')?.wal ?? null;
+  }
+
+  /** The leader's stored snapshot, if it has taken one. */
+  leaderSnapshot(group: GroupView) {
+    return group.cells.find((cell: GroupCell) => cell.role === 'Leader')?.snapshot ?? null;
   }
 
   /** Every replica's copy added up: what this group costs the cluster, not one machine. */

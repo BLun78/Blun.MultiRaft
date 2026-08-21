@@ -39,6 +39,13 @@ export interface SendStatus {
   error: string | null;
 }
 
+/** A node's stored snapshot for one group. Absent when the group has never taken one. */
+export interface SnapshotStatus {
+  lastIncludedIndex: number;
+  lastIncludedTerm: number;
+  sizeBytes: number;
+}
+
 export interface GroupCell {
   node: number;
   online: boolean;
@@ -47,6 +54,7 @@ export interface GroupCell {
   leader: string | null;
   commitIndex: number;
   wal: WalStatus | null;
+  snapshot: SnapshotStatus | null;
 }
 
 export interface GroupView {

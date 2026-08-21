@@ -336,11 +336,12 @@ internal sealed class ClusterWatcher(
 
             if (group is null)
             {
-                cells.Add(new GroupCell(node.Id, false, "Unknown", 0, null, 0, null));
+                cells.Add(new GroupCell(node.Id, false, "Unknown", 0, null, 0, null, null));
                 continue;
             }
 
-            cells.Add(new GroupCell(node.Id, true, group.Role, group.Term, group.Leader, group.CommitIndex, group.Wal));
+            cells.Add(new GroupCell(
+                node.Id, true, group.Role, group.Term, group.Leader, group.CommitIndex, group.Wal, group.Snapshot));
             opinions.Add(group.Leader);
 
             // A run is carried by whichever node was leading when it started, and it is the only node that
