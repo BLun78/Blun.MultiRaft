@@ -17,6 +17,15 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
+// SEC-005: loopback binding is a boundary against the network, not against a browser tab -- any page the
+// developer has open can already reach 127.0.0.1. Host filtering closes the DNS-rebinding half of that
+// (a domain resolving to 127.0.0.1 bypassing same-origin); the Origin check registered below closes the
+// CSRF half for the one state-changing endpoint this app exposes.
+builder.Services.AddHostFiltering(options =>
+{
+    options.AllowedHosts = ["localhost", "127.0.0.1", "[::1]"];
+});
+
 var self = new NodeId(ulong.Parse(
     builder.Configuration["RAFT_NODE_ID"] ?? "1",
     CultureInfo.InvariantCulture));
@@ -85,6 +94,28 @@ builder.Services.AddSingleton<IRaftClusterListener>(
 builder.Services.AddHostedService(provider => provider.GetRequiredService<RaftNodeHost>());
 
 WebApplication app = builder.Build();
+
+app.UseHostFiltering();
+
+// SEC-005: a same-site or missing Origin is allowed through (curl and other non-browser tooling send none,
+// and this is a demo control surface scripts are expected to drive), but a foreign Origin on a
+// state-changing request is rejected. Every modern browser attaches Origin to a cross-origin POST, so this
+// stops the fetch()/form-based CSRF the audit's proof of concept relies on without breaking scripted use.
+app.Use(async (context, next) =>
+{
+    if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
+    {
+        string? origin = context.Request.Headers.Origin;
+        if (origin is not null
+            && !string.Equals(origin, $"{context.Request.Scheme}://{context.Request.Host}", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+    }
+
+    await next(context).ConfigureAwait(false);
+});
 
 app.MapGrpcService<RaftProtocolService>();
 
