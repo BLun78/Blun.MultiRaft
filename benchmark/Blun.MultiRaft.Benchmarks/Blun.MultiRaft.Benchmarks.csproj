@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
+    <PackageReference Include="K4os.Compression.LZ4" />
   </ItemGroup>
 
   <ItemGroup>
