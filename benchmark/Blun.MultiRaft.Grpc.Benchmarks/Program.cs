@@ -86,7 +86,7 @@ return;
 async Task<double> MeasureMultiplexedAsync(int groups, bool warmup)
 {
     await using var transport = new GrpcRaftTransport(
-        new GrpcRaftTransportOptions { Peers = new Dictionary<NodeId, Uri> { [peer] = address } },
+        new GrpcRaftTransportOptions { Peers = new Dictionary<NodeId, Uri> { [peer] = address }, LocalNode = new NodeId(1) },
         new InstantListener());
 
     // Excluded from the figure deliberately: one connection is opened per node pair regardless of group

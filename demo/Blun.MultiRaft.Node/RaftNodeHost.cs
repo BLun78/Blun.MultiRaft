@@ -69,6 +69,7 @@ public sealed class RaftNodeHost : IHostedService, IRaftProtocolListener, IRaftC
             new GrpcRaftTransportOptions
             {
                 Peers = _peers,
+                LocalNode = _self,
                 Protocol = _protocol,
                 Logger = _loggerFactory.CreateLogger<GrpcRaftTransport>(),
             },

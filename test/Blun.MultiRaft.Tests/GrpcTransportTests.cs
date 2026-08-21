@@ -59,7 +59,7 @@ public sealed class GrpcTransportTests : IAsyncLifetime
     {
         var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
         await using var transport = new GrpcRaftTransport(
-            new GrpcRaftTransportOptions { Peers = peers, Protocol = RaftGrpcProtocol.Http2 },
+            new GrpcRaftTransportOptions { Peers = peers, LocalNode = new NodeId(0), Protocol = RaftGrpcProtocol.Http2 },
             new InstantListener());
 
         // Well past Kestrel's own default of 100 concurrent streams per connection -- this transport holds
@@ -145,7 +145,7 @@ public sealed class GrpcTransportTests : IAsyncLifetime
         // Blun.MQ priority-index rebuild on a replica would silently disagree with the leader's.
         var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
         await using var transport = new GrpcRaftTransport(
-            new GrpcRaftTransportOptions { Peers = peers, Protocol = RaftGrpcProtocol.Http2 },
+            new GrpcRaftTransportOptions { Peers = peers, LocalNode = new NodeId(0), Protocol = RaftGrpcProtocol.Http2 },
             new InstantListener());
 
         var request = new AppendEntriesRequest(new RaftGroupId(1), 1, new NodeId(0), 0, 0, 0);
@@ -198,7 +198,7 @@ public sealed class GrpcTransportTests : IAsyncLifetime
 
                 var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
                 await using var transport = new GrpcRaftTransport(
-                    new GrpcRaftTransportOptions { Peers = peers, Protocol = RaftGrpcProtocol.Http2 },
+                    new GrpcRaftTransportOptions { Peers = peers, LocalNode = new NodeId(0), Protocol = RaftGrpcProtocol.Http2 },
                     new InstantListener());
 
                 AppendEntriesResponse response = await transport.AppendEntriesAsync(
@@ -255,7 +255,7 @@ public sealed class GrpcTransportTests : IAsyncLifetime
 
             var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
             await using var transport = new GrpcRaftTransport(
-                new GrpcRaftTransportOptions { Peers = peers, Protocol = RaftGrpcProtocol.Http2 },
+                new GrpcRaftTransportOptions { Peers = peers, LocalNode = new NodeId(0), Protocol = RaftGrpcProtocol.Http2 },
                 new InstantListener());
 
             InstallSnapshotResponse response = await transport.InstallSnapshotAsync(

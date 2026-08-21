@@ -22,6 +22,12 @@ public sealed class GrpcRaftTransportOptions
     /// <summary>Address of each peer, by node id. The local node may be present and is simply never dialled.</summary>
     public required IReadOnlyDictionary<NodeId, Uri> Peers { get; init; }
 
+    /// <summary>
+    /// This node's own id, asserted to <see cref="Authenticator"/> when opening an outbound session. Required
+    /// so a caller cannot forget to configure it and silently fall back to an unauthenticated identity.
+    /// </summary>
+    public required NodeId LocalNode { get; init; }
+
     /// <summary>How long to wait for a peer's reply before treating it as unreachable.</summary>
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
@@ -33,6 +39,19 @@ public sealed class GrpcRaftTransportOptions
     /// silent, and that silence is what made a follower-side append failure invisible from both ends.
     /// </summary>
     public ILogger? Logger { get; init; }
+
+    /// <summary>
+    /// Optional. When set, every outbound session carries an <c>x-raft-auth</c> header built from
+    /// <see cref="LocalNode"/> for the peer to validate. See SEC-001 in <c>doc/audit</c>: without this, the
+    /// endpoint on the other end has no way to tell this node apart from an arbitrary caller.
+    /// </summary>
+    public IRaftPeerAuthenticator? Authenticator { get; init; }
+
+    /// <summary>
+    /// Optional. Identifies the host application in the <c>User-Agent</c> sent on every peer connection,
+    /// ahead of this library's own token. See <see cref="RaftUserAgent.ForApplication"/>.
+    /// </summary>
+    public string? UserAgent { get; init; }
 }
 
 /// <summary>
@@ -244,7 +263,15 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
         }
 
         PeerConnection connection = await PeerConnection
-            .OpenAsync(address, _options.Protocol, _listener, _options.Logger, cancellationToken)
+            .OpenAsync(
+                address,
+                _options.Protocol,
+                _listener,
+                _options.Logger,
+                _options.LocalNode,
+                _options.Authenticator,
+                _options.UserAgent,
+                cancellationToken)
             .ConfigureAwait(false);
 
         // A concurrent caller may have won the race; keep whichever landed first and discard the loser
@@ -308,11 +335,14 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
         // still receives is a reply to a call that will never be sent. Both loops must be alive.
         public bool IsAlive => !Session.ReaderLoop.IsCompleted && !Session.WriterLoop.IsCompleted;
 
-        public static ValueTask<PeerConnection> OpenAsync(
+        public static async ValueTask<PeerConnection> OpenAsync(
             Uri address,
             RaftGrpcProtocol protocol,
             IRaftProtocolListener listener,
             ILogger? logger,
+            NodeId localNode,
+            IRaftPeerAuthenticator? authenticator,
+            string? userAgent,
             CancellationToken cancellationToken)
         {
             // EnableMultipleHttp2Connections is the client-side half of "the 101st stream still works": if
@@ -323,10 +353,17 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
             // approached, which is the common case since this transport normally holds one stream per peer.
             var handler = new SocketsHttpHandler { EnableMultipleHttp2Connections = true };
 
-            // DefaultRequestVersion/DefaultVersionPolicy live on HttpClient, not on the handler underneath
-            // it -- wrapping the handler is what GrpcChannelOptions.HttpClient (rather than .HttpHandler)
-            // expects, and disposing the channel disposes this client, which disposes the handler in turn.
-            var httpClient = new HttpClient(handler);
+            // UserAgentHandler sits between the socket handler and the HttpClient so it can rewrite the
+            // request's User-Agent header after grpc-dotnet has already set its own token on it -- see
+            // UserAgentHandler for why this cannot be done as gRPC metadata instead. DefaultRequestVersion/
+            // DefaultVersionPolicy still have to live on HttpClient, not on either handler, and only one of
+            // GrpcChannelOptions.HttpClient/.HttpHandler may be set, which is why the chain is wrapped into a
+            // single HttpClient rather than passed as HttpHandler directly.
+            var userAgentHandler = new UserAgentHandler(RaftUserAgent.ForApplication(userAgent)) { InnerHandler = handler };
+
+            // Disposing the channel disposes this client, which disposes userAgentHandler, which disposes the
+            // socket handler in turn.
+            var httpClient = new HttpClient(userAgentHandler);
 
             if (protocol == RaftGrpcProtocol.Http3)
             {
@@ -344,7 +381,18 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
 
             GrpcChannel channel = GrpcChannel.ForAddress(address, new GrpcChannelOptions { HttpClient = httpClient, DisposeHttpClient = true });
             var client = new RaftProtocol.RaftProtocolClient(channel);
-            AsyncDuplexStreamingCall<RaftFrame, RaftFrame> call = client.Session(cancellationToken: default);
+
+            var callOptions = new CallOptions();
+            if (authenticator is not null)
+            {
+                // Built before the call opens: a session with no valid header is exactly the SEC-001 gap this
+                // authenticator exists to close, so there is no "connect first, authenticate later" path here.
+                string header = await authenticator.CreateHeaderAsync(localNode, cancellationToken).ConfigureAwait(false);
+                var metadata = new Metadata { { "x-raft-auth", header } };
+                callOptions = callOptions.WithHeaders(metadata);
+            }
+
+            AsyncDuplexStreamingCall<RaftFrame, RaftFrame> call = client.Session(callOptions);
             var session = new RaftStreamSession(
                 call.RequestStream,
                 call.ResponseStream,
@@ -352,7 +400,7 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
                 CancellationToken.None,
                 logger);
 
-            return ValueTask.FromResult(new PeerConnection(channel, call, session));
+            return new PeerConnection(channel, call, session);
         }
 
         public async ValueTask DisposeAsync()
