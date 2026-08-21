@@ -308,12 +308,21 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
             }
         }
 
-        foreach (RaftGroupInstance instance in _groups.Values)
+        // Cleared before any instance is disposed, not after: every inbound request (OnAppendEntriesAsync,
+        // OnRequestVoteAsync, ...) resolves its target with _groups.TryGetValue on each call rather than
+        // holding a reference, so this is what actually stops a peer's request from reaching a group that is
+        // mid-teardown. Without it, a request that looked the group up a moment before this loop started
+        // could still be writing to its meta store or WAL after DisposeAsync considered that group gone --
+        // RaftGroupInstance.DisposeAsync waits out whatever already got in, but only this closes the door on
+        // anything new getting in behind it.
+        RaftGroupInstance[] instances = [.. _groups.Values];
+        _groups.Clear();
+
+        foreach (RaftGroupInstance instance in instances)
         {
             await instance.DisposeAsync().ConfigureAwait(false);
         }
 
-        _groups.Clear();
         _shutdown.Dispose();
     }
 

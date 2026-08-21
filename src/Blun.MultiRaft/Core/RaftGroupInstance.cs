@@ -933,8 +933,12 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
 
             // .AsTask(), not a bare discard: a ValueTask must be consumed exactly once, and with
             // ValueTask-pooling enabled, discarding it while it is still running lets the pool recycle the
-            // underlying IValueTaskSource out from under this call.
-            _ = ApplyCommittedAsync().AsTask();
+            // underlying IValueTaskSource out from under this call. Tracked in _backgroundWork for the same
+            // reason campaign/replication/compaction are: applying a committed entry can itself trigger
+            // auto-compaction, which queues its own tracked task -- untracked here, that could still be
+            // running (and about to add a fresh entry to _backgroundWork) after DisposeAsync has already
+            // drained it.
+            _backgroundWork.Add(ApplyCommittedAsync().AsTask());
         }
     }
 
@@ -1048,6 +1052,15 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
 #pragma warning restore CA1031
         }
 
+        // _backgroundWork only covers what this instance started itself. OnAppendEntriesAsync,
+        // OnRequestVoteAsync and the rest are called directly by the host on behalf of a peer, not queued
+        // through _backgroundWork, and none of them check _disposed before taking _stateGate -- a call that
+        // was already past that wait when MultiRaftHost removed this group from its lookup (so no *new* call
+        // can start) is still free to run to completion, meta-store write and all. Taking the gate here and
+        // simply never releasing it is what waits that out: it blocks until whoever is holding it finishes,
+        // and since nothing can ever look this group up again, nothing will ever wait on it after us.
+        await _stateGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+
         // The log is disposed here because this instance owns it: it is handed one at construction, nothing
         // else may write to it while the group lives, and the two lifetimes are the same. Leaving it open
         // leaked a file handle per group on every host shutdown — on Windows that keeps the segment files
@@ -1057,11 +1070,10 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
 
         _shutdown.Dispose();
 
-        // _stateGate/_applyGate are deliberately not disposed: every acquirer checks _disposed before
-        // waiting, but that check and the wait are not atomic, so a caller could pass the check and then
-        // wait on a semaphore this method just disposed out from under it. SemaphoreSlim.Dispose only
-        // matters if AvailableWaitHandle was used, which it never is here, so leaving both alive is the
-        // simplest way to avoid that race.
+        // _stateGate/_applyGate are deliberately not disposed (only ever acquired, above and elsewhere,
+        // never released again after this point): SemaphoreSlim.Dispose only matters if AvailableWaitHandle
+        // was used, which it never is here, so there is nothing Dispose would buy that holding the gate open
+        // forever does not already give for free.
     }
 
     private async ValueTask<long> AppendCoreAsync(
@@ -1898,7 +1910,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         ReleaseCommitWaiters(candidate);
 
         // .AsTask(), not a bare discard: see the identical comment on the OnAppendEntriesAsync call site.
-        _ = ApplyCommittedAsync().AsTask();
+        _backgroundWork.Add(ApplyCommittedAsync().AsTask());
     }
 
     private void ReleaseCommitWaiters(long committed)
