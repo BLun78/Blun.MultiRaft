@@ -22,3 +22,10 @@ Thumbs.db
 
 ## Local node data written by the demo
 demo/**/data/
+
+## Node (D-001): committed node_modules is a real supply-chain risk -- package-lock.json already covers
+## reproducibility, and dist/ is build output for the same reason bin/ is ignored above.
+node_modules/
+dist/
+npm-debug.log*
+.angular/
