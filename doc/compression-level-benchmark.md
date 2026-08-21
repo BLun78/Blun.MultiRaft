@@ -122,9 +122,11 @@ dass dort Flush dominiert und kein Signal zu erwarten ist.
   maximale Ratio. Die feinen HC-Zwischenstufen bewegen sich laut K4os-Doku nahezu linear mit dem Regler,
   die Auflösung wird für diesen Kurzlauf nicht gebraucht.
 - **Inhaltstyp**: `Random, Repetitive` — unverändert, größter Einflussfaktor auf die Kompressionsrate.
-- **API**: `Pickler, Stream, Frame` — unverändert, das ist der eigentliche Kern dieser Runde.
+- **API**: `Stream, Frame` — `Pickler` bewusst ausgelassen; das ist die bereits gut verstandene
+  One-Shot-Block-Format-Baseline aus der vollen Matrix, die eigentlich offene Frage hier ist Stream vs.
+  Frame (beide LZ4-Frame-Format).
 
-8 × 4 × 2 × 3 = **192 Fälle**.
+8 × 4 × 2 × 2 = **128 Fälle**.
 
 **Abweichung von der Projektregel** ("Benchmarks müssen immer net10.0 und net11.0 gemeinsam laufen", siehe
 CLAUDE.md): dieser Lauf läuft bewusst **nur unter `net11.0`** — ein expliziter, einmaliger Kurzlauf für eine

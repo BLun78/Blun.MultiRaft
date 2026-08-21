@@ -200,7 +200,13 @@ public class CompressionLevelLargePayloadBenchmarks
     [ParamsAllValues]
     public PayloadContentType ContentType { get; set; }
 
-    [ParamsAllValues]
+    /// <summary>
+    /// <see cref="CompressionApi.Pickler"/> dropped from this reduced pass — it's the well-understood
+    /// one-shot block-format baseline already exercised by the full matrix; the open question here is
+    /// specifically <see cref="CompressionApi.Stream"/> vs. <see cref="CompressionApi.Frame"/>, the two
+    /// frame-format encoders.
+    /// </summary>
+    [Params(CompressionApi.Stream, CompressionApi.Frame)]
     public CompressionApi Api { get; set; }
 
     private string _root = string.Empty;
