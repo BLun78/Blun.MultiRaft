@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# D-007(a): without this, GITHUB_TOKEN inherits the repository default, which some org settings leave at
+# read-write. This workflow only ever reads the repo and uploads artifacts, so read is enough.
+permissions:
+  contents: read
+
 jobs:
   build:
     # Windows, Linux and macOS are first-class targets per the spec. Running all three is what turns that
@@ -19,6 +24,12 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      # D-007(b): tags are movable, so a compromised action repo that moves its vN tag would have this
+      # workflow run the new code on the next push/PR without any change here. Pinning to a commit SHA is
+      # the fix, but it requires verifying the SHA for each action's actual current release against GitHub
+      # at the time of pinning -- left as a tag for now rather than guessing a SHA that cannot be verified
+      # from inside this environment; whoever pins these should record `# vX.Y.Z` next to each SHA as the
+      # audit doc's own example does.
       - uses: actions/checkout@v4
 
       - uses: actions/setup-dotnet@v4
@@ -34,13 +45,19 @@ jobs:
       - name: Build
         run: dotnet build Blun.MultiRaft.slnx --no-restore -c Release
 
-      - name: Test
+      - name: Test (net10.0)
         # Not `dotnet test`: this project's Microsoft.Testing.Platform / xUnit v3 setup only runs through the
         # new MTP runner, and `dotnet test`'s VSTest bridge is refused outright on the .NET 10+ SDK ("Testing
         # with VSTest target is no longer supported"). Verified locally, not assumed -- `dotnet test` with
         # this exact invocation fails immediately, before a single test runs. `dotnet exec` on the built DLL
         # goes straight to the MTP entry point and takes MTP's own `-result-trx` flag instead.
-        run: dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/results.trx
+        run: dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/net10.trx
+
+      - name: Test (net11.0)
+        # D-002: net11.0 carries runtime-async=on, an experimental switch that changes how async methods
+        # execute -- exactly the behavior this library's async-heavy core depends on, and until now it ran
+        # unverified on every platform. Same MTP invocation, the other target's build output.
+        run: dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net11.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/net11.trx
 
       - name: Upload test results
         if: always()

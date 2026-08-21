@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- D-002: net11.0 carries runtime-async=on, an experimental switch that changes how async methods
+         execute, on the library whose failure class CLAUDE.md itself calls "intermittent rather than
+         deterministic". Testing only net10.0 left exactly that behavior unverified on every platform. -->
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
     <!-- Threading a TestContext token through every await adds noise without changing what is verified. -->
