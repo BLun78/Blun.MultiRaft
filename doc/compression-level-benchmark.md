@@ -77,4 +77,33 @@ ein Aufrufer tatsächlich abwartet).
 
 ## Ergebnis
 
-_(wird nach dem Benchmark-Lauf ergänzt)_
+**Status: Lauf abgebrochen, unvollständig.** Die volle Matrix (13 Größen × 12 Level × 2 Inhaltstypen × 3
+APIs = 936 Fälle × 2 Runtimes ≈ 1.873 BenchmarkDotNet-Cases) hätte laut BenchmarkDotNet-eigener Schätzung
+~21 Stunden gebraucht (jeder Fall fährt Warmup/Pilot/Workload mit echtem `FlushAsync`). Der Lauf wurde nach
+439 abgeschlossenen Fällen (~23%, Größen 100 B–2.000 B) manuell gestoppt. Rohdaten der abgeschlossenen Fälle:
+`compression-bench-partial.csv` (im Repo-Root, nicht committet — Artefakt eines lokalen Laufs).
+
+**Was die vorliegenden Teildaten zeigen (100 B–2.000 B):**
+
+| Größe | `None` (Baseline) | Beste Kombo | Schlechteste Kombo |
+|---|---|---|---|
+| 100 B | keine `None`-Messung in diesem Teillauf gelaufen | `L08_HC` + Stream, 1,956 ms | `L05_HC` + Stream, 2,018 ms |
+| 500 B | 1,959 ms | `L00_FAST` + Frame, 1,947 ms | `L12_MAX` + Pickler, 1,991 ms |
+| 1.000 B | 1,959 ms | `L00_FAST` + Stream, 1,942 ms | `L07_HC` + Frame, 2,107 ms |
+| 2.000 B | 1,984 ms | `L00_FAST` + Stream, 1,982 ms | `L05_HC` + Pickler, 2,050 ms |
+
+API-Durchschnitt über alle komprimierten Fälle in diesem Bereich (n≈134-135 je API): Frame 1,993 ms,
+Pickler 1,992 ms, Stream 1,990 ms — praktisch gleichauf. Inhaltstyp: Random 1,996 ms vs. Repetitive
+1,987 ms — ebenfalls kein nennenswerter Unterschied.
+
+**Einordnung — kein Ergebnis, sondern ein Zwischenstand ohne Aussagekraft für die eigentliche Fragestellung:**
+Bei 100 B–2.000 B liegt praktisch jede Kombination innerhalb von ±3% der `None`-Baseline (~1,94–2,11 ms).
+Das ist erwartbar: `FlushAsync` (echter fsync) dominiert die Gesamtzeit vollständig, Kompressionszeit für
+so kleine Payloads liegt im Mikrosekundenbereich und geht im Flush-Rauschen unter. **Die eigentlich
+interessante Frage — ab welcher Payload-Größe sich Kompression lohnt und ob Stream/Frame gegen Pickler
+gewinnen — bleibt unbeantwortet**, weil die dafür relevanten großen Größenklassen (16 KB–1 MiB, wo
+Kompressionszeit und -rate signifikant gegenüber Flush werden) in diesem Teillauf nicht erreicht wurden.
+
+**Nächster Schritt, falls die Frage weiterverfolgt wird:** entweder den vollen Lauf über Nacht/mehrere
+Stunden laufen lassen, oder die Matrix gezielt verkleinern (z.B. nur die oberen Größenstufen ab 16 KB, wo
+das Signal erwartbar ist, statt der kompletten 13-Punkte-Sweep von vorne).
