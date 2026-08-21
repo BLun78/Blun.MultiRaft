@@ -238,6 +238,19 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         }
 
         _inboundSnapshots.Clear();
+
+        // Both pumps read _shutdown.Token on every iteration, and HandleRequestAsync hands it to the
+        // listener. Disposing the token source while either loop is still running turns its next token
+        // access into an ObjectDisposedException that neither loop's catch list expects.
+        try
+        {
+            await Task.WhenAll(ReaderLoop, WriterLoop).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or RpcException or IOException or InvalidOperationException)
+        {
+            // Both loops end this way; that is the ordinary shutdown path.
+        }
+
         _shutdown.Dispose();
     }
 

@@ -546,8 +546,11 @@ public sealed class SegmentedRaftWal : IRaftWal
         }
         finally
         {
+            // _writeGate is deliberately not disposed. Every append checks _disposed before waiting on the
+            // gate, but the check and the wait are not atomic, so a caller could pass the check just before
+            // this runs and then wait on a semaphore this method just disposed out from under it.
+            // SemaphoreSlim.Dispose only matters if AvailableWaitHandle was used, which it never is here.
             _writeGate.Release();
-            _writeGate.Dispose();
         }
     }
 

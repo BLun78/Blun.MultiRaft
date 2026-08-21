@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Blun.MultiRaft.Grpc.Benchmarks": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:55306;http://localhost:55307"
+    }
+  }
+}

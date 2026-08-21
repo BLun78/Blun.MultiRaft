@@ -205,6 +205,12 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     /// Blun.MQ, a priority bucket or SMQ due-time bucket, so a priority-index rebuild can use
     /// <see cref="IRaftWal.ReadHeadersFromAsync"/> instead of deserializing every payload.
     /// </param>
+    /// <remarks>
+    /// At <see cref="DurabilityLevel.Quorum"/> (the default), this waits for the entry to commit. Called with
+    /// the default <paramref name="cancellationToken"/> — i.e. <c>AppendAsync(payload)</c> — that wait has no
+    /// bound of its own: if the group loses quorum, the call hangs until this instance is disposed or a
+    /// token is supplied. Pass a token whenever the caller cannot afford to wait indefinitely.
+    /// </remarks>
     /// <returns>The index the command was assigned.</returns>
     public ValueTask<long> AppendAsync(
         ReadOnlyMemory<byte> payload,
@@ -794,8 +800,10 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     Volatile.Write(ref _campaignInFlight, 0);
                 }
-            },
-            _shutdown.Token);
+            });
+
+        // No token passed to Task.Run: an already-cancelled token would skip the delegate entirely and
+        // leave _campaignInFlight latched at 1 forever. Cancellation is observed inside the body instead.
     }
 
     /// <summary>Starts an election immediately, skipping the timer. Used for bootstrap and for leader transfer.</summary>
@@ -1010,8 +1018,12 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         await _wal.DisposeAsync().ConfigureAwait(false);
 
         _shutdown.Dispose();
-        _stateGate.Dispose();
-        _applyGate.Dispose();
+
+        // _stateGate/_applyGate are deliberately not disposed: every acquirer checks _disposed before
+        // waiting, but that check and the wait are not atomic, so a caller could pass the check and then
+        // wait on a semaphore this method just disposed out from under it. SemaphoreSlim.Dispose only
+        // matters if AvailableWaitHandle was used, which it never is here, so leaving both alive is the
+        // simplest way to avoid that race.
     }
 
     private async ValueTask<long> AppendCoreAsync(
@@ -1314,8 +1326,10 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             return;
         }
 
-        foreach (PeerReplicationState peer in _peers.Values)
+        foreach (KeyValuePair<NodeId, PeerReplicationState> pair in _peers)
         {
+            PeerReplicationState peer = pair.Value;
+
             // One outstanding round per peer. Without this, a slow follower accumulates a queue of redundant
             // RPCs, each carrying entries the next one supersedes.
             if (Interlocked.CompareExchange(ref peer.InFlight, 1, 0) != 0)
@@ -1331,7 +1345,11 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             // means it cannot get back to observing shutdown cancellation until replication is done. Handing
             // the work to the pool lets the tick return immediately, so shutdown is never held hostage by
             // however long replication to a peer happens to take.
-            _ = Task.Run(() => ReplicateToPeerAsync(peer), _shutdown.Token);
+            //
+            // No token passed to Task.Run itself: an already-cancelled token would skip the delegate and
+            // leave peer.InFlight latched at 1 forever. ReplicateToPeerAsync observes _shutdown.Token inside
+            // its own body instead.
+            _ = Task.Run(() => ReplicateToPeerAsync(peer));
         }
     }
 
@@ -1924,8 +1942,11 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     Volatile.Write(ref _compactionInFlight, 0);
                 }
-            },
-            _shutdown.Token);
+            });
+
+        // No token passed to Task.Run: the delegate is what clears _compactionInFlight, and Task.Run with an
+        // already-cancelled token never runs its delegate at all -- the flag would latch at 1 forever.
+        // Cancellation is already observed inside the body via _shutdown.Token.
     }
 
     private async ValueTask<bool> IsCandidateLogCurrentAsync(VoteRequest request, CancellationToken cancellationToken)
