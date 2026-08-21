@@ -76,6 +76,21 @@ internal static class RaftFrameCodec
 
     public static RaftLogEntry ToDomain(LogEntry entry)
     {
+        // Unchecked, these are lossy narrowing casts (SEC-007): Kind = 258 truncates to
+        // RaftEntryKind.Membership (258 & 0xFF == 2), turning an ordinary Command into a membership change
+        // the receiver applies -- including to the cluster group's own voter set. Rejected here instead,
+        // as an integrity violation: a Kind or ApplicationTag this node does not understand is a protocol
+        // mismatch, not something to silently reinterpret.
+        if (entry.Kind > (uint)RaftEntryKind.Membership)
+        {
+            throw new InvalidOperationException($"Unknown log entry kind {entry.Kind}.");
+        }
+
+        if (entry.ApplicationTag > byte.MaxValue)
+        {
+            throw new InvalidOperationException($"Application tag {entry.ApplicationTag} does not fit a byte.");
+        }
+
         byte[] payload = entry.Payload.ToByteArray();
         return new RaftLogEntry(
             new RaftEntryHeader(
