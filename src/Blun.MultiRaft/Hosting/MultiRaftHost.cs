@@ -35,6 +35,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
     private readonly TimeSpan _tickInterval;
 
     private Task? _ticker;
+    private bool _disposed;
 
     /// <summary>Creates a host. Nothing ticks until <see cref="StartAsync"/> is called.</summary>
     public MultiRaftHost(
@@ -75,9 +76,9 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         get
         {
             int count = 0;
-            foreach (RaftGroupInstance instance in _groups.Values)
+            foreach (KeyValuePair<RaftGroupId, RaftGroupInstance> pair in _groups)
             {
-                if (instance.IsLeader)
+                if (pair.Value.IsLeader)
                 {
                     count++;
                 }
@@ -287,6 +288,13 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+
         await _shutdown.CancelAsync().ConfigureAwait(false);
         if (_ticker is not null)
         {
@@ -294,9 +302,9 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
             {
                 await _ticker.ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (Exception)
             {
-                // Expected on shutdown.
+                // Whatever ended the tick loop, shutdown must still proceed and dispose every group below.
             }
         }
 
@@ -326,14 +334,14 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
                     return;
                 }
 
-                foreach (RaftGroupInstance instance in _groups.Values)
+                foreach (KeyValuePair<RaftGroupId, RaftGroupInstance> pair in _groups)
                 {
-                    if (instance.Group == RaftGroupId.Cluster)
+                    if (pair.Key == RaftGroupId.Cluster)
                     {
                         continue;
                     }
 
-                    if (!await TickOneAsync(instance).ConfigureAwait(false))
+                    if (!await TickOneAsync(pair.Value).ConfigureAwait(false))
                     {
                         return;
                     }
