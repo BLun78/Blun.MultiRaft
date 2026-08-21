@@ -107,3 +107,35 @@ Kompressionszeit und -rate signifikant gegenüber Flush werden) in diesem Teilla
 **Nächster Schritt, falls die Frage weiterverfolgt wird:** entweder den vollen Lauf über Nacht/mehrere
 Stunden laufen lassen, oder die Matrix gezielt verkleinern (z.B. nur die oberen Größenstufen ab 16 KB, wo
 das Signal erwartbar ist, statt der kompletten 13-Punkte-Sweep von vorne).
+
+## Verkleinerte Matrix: `CompressionLevelLargePayloadBenchmarks`
+
+Eigene, separate Benchmark-Klasse (die volle 936-Fälle-Matrix in `CompressionLevelBenchmarks` bleibt
+unverändert für einen späteren vollständigen Lauf erhalten). Ziel: ~200 Fälle, die in Minuten statt Stunden
+laufen, und die Größen unter 2.000 B auslassen — die haben im abgebrochenen vollen Lauf bereits gezeigt,
+dass dort Flush dominiert und kein Signal zu erwarten ist.
+
+**Reduzierte Achsen:**
+- **Größen** (ab 2.000 B): `2_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 1_048_576` — 8
+  log-verteilte Stützstellen von 2 KB bis 1 MiB.
+- **Level**: `None, L00_FAST, L06_HC, L12_MAX` — Baseline, schnellster, ein repräsentativer Mittel-HC, und
+  maximale Ratio. Die feinen HC-Zwischenstufen bewegen sich laut K4os-Doku nahezu linear mit dem Regler,
+  die Auflösung wird für diesen Kurzlauf nicht gebraucht.
+- **Inhaltstyp**: `Random, Repetitive` — unverändert, größter Einflussfaktor auf die Kompressionsrate.
+- **API**: `Pickler, Stream, Frame` — unverändert, das ist der eigentliche Kern dieser Runde.
+
+8 × 4 × 2 × 3 = **192 Fälle**.
+
+**Abweichung von der Projektregel** ("Benchmarks müssen immer net10.0 und net11.0 gemeinsam laufen", siehe
+CLAUDE.md): dieser Lauf läuft bewusst **nur unter `net11.0`** — ein expliziter, einmaliger Kurzlauf für eine
+schnelle Exploration, kein Zahlenwert, der als Vergleichsergebnis in einen Report ginge.
+
+Aufruf:
+
+```bash
+dotnet run --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -c Release -f net11.0 -- --runtimes net11.0 --filter "*CompressionLevelLargePayloadBenchmarks*"
+```
+
+### Ergebnis (verkleinerte Matrix)
+
+_(wird nach dem Lauf ergänzt)_

@@ -133,7 +133,7 @@ public class CompressionLevelBenchmarks
             });
 
         _wal = await _factory.OpenAsync(new RaftGroupId(1)).ConfigureAwait(false);
-        _payload = BuildPayload(PayloadBytes, ContentType);
+        _payload = CompressionHelpers.BuildPayload(PayloadBytes, ContentType);
         _index = _wal.LastIndex;
     }
 
@@ -151,7 +151,7 @@ public class CompressionLevelBenchmarks
     [Benchmark]
     public async Task<long> CompressAppendFlush()
     {
-        ReadOnlyMemory<byte> onWire = Compress();
+        ReadOnlyMemory<byte> onWire = CompressionHelpers.Compress(_payload, Compression, Api);
 
         long index = ++_index;
         var header = new RaftEntryHeader(
@@ -165,21 +165,115 @@ public class CompressionLevelBenchmarks
         await _wal.FlushAsync().ConfigureAwait(false);
         return result;
     }
+}
 
-    private ReadOnlyMemory<byte> Compress()
+/// <summary>
+/// A ~200-case slice of <see cref="CompressionLevelBenchmarks"/>'s full matrix, for a run that finishes in
+/// minutes rather than the ~21h the full 936-case x 2-runtime sweep needed. Trims three axes at once:
+/// payload sizes start at 2,000 B (the small end already showed flush dominating everything up to 2,000 B in
+/// the aborted full run — see doc/compression-level-benchmark.md), compression levels drop to four
+/// representative points, and this only runs net11.0 rather than the usual paired net10.0/net11.0 comparison
+/// — a deliberate, one-off deviation from the "always compare both runtimes" rule for a quick exploratory
+/// pass, not the number that would ship in a report.
+/// </summary>
+[MemoryDiagnoser]
+[CsvExporter]
+public class CompressionLevelLargePayloadBenchmarks
+{
+    /// <summary>8 log-spaced points from 2,000 B to 1 MiB, skipping the sub-2 KB range already covered.</summary>
+    [Params(2_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 1_048_576)]
+    public int PayloadBytes { get; set; }
+
+    /// <summary>
+    /// Four stand-ins for the full 12-level sweep: the required <see cref="CompressionLevelOption.None"/>
+    /// baseline, the cheapest level, one representative mid-range HC level, and the maximum-ratio level.
+    /// HC levels move close to linearly with the dial per K4os's own docs, so the fine-grained middle steps
+    /// add resolution this reduced pass does not need.
+    /// </summary>
+    [Params(
+        CompressionLevelOption.None,
+        CompressionLevelOption.L00_FAST,
+        CompressionLevelOption.L06_HC,
+        CompressionLevelOption.L12_MAX)]
+    public CompressionLevelOption Compression { get; set; }
+
+    [ParamsAllValues]
+    public PayloadContentType ContentType { get; set; }
+
+    [ParamsAllValues]
+    public CompressionApi Api { get; set; }
+
+    private string _root = string.Empty;
+    private IRaftWalFactory _factory = null!;
+    private IRaftWal _wal = null!;
+    private byte[] _payload = [];
+    private long _index;
+
+    [GlobalSetup]
+    public async Task SetupAsync()
     {
-        if (Compression == CompressionLevelOption.None)
+        _root = Path.Combine(Path.GetTempPath(), "blun-compression-bench-large-" + Guid.NewGuid().ToString("N"));
+
+        _factory = new SegmentedRaftWalFactory(
+            _root,
+            new SegmentedRaftWalOptions
+            {
+                FlushToDisk = true,
+                SegmentAccess = WalSegmentAccess.RandomAccess,
+                SegmentSizeBytes = 512L * 1024 * 1024,
+            });
+
+        _wal = await _factory.OpenAsync(new RaftGroupId(1)).ConfigureAwait(false);
+        _payload = CompressionHelpers.BuildPayload(PayloadBytes, ContentType);
+        _index = _wal.LastIndex;
+    }
+
+    [GlobalCleanup]
+    public async Task CleanupAsync()
+    {
+        await _wal.DisposeAsync().ConfigureAwait(false);
+        if (Directory.Exists(_root))
         {
-            return _payload;
+            Directory.Delete(_root, recursive: true);
+        }
+    }
+
+    [Benchmark]
+    public async Task<long> CompressAppendFlush()
+    {
+        ReadOnlyMemory<byte> onWire = CompressionHelpers.Compress(_payload, Compression, Api);
+
+        long index = ++_index;
+        var header = new RaftEntryHeader(
+            term: 1,
+            index: index,
+            RaftEntryKind.Command,
+            onWire.Length,
+            DateTime.UtcNow.Ticks);
+
+        long result = await _wal.AppendAsync(header, onWire).ConfigureAwait(false);
+        await _wal.FlushAsync().ConfigureAwait(false);
+        return result;
+    }
+}
+
+/// <summary>Compression dispatch shared by every benchmark class in this file, so no two copies can drift.</summary>
+internal static class CompressionHelpers
+{
+    public static ReadOnlyMemory<byte> Compress(byte[] payload, CompressionLevelOption compression, CompressionApi api)
+    {
+        if (compression == CompressionLevelOption.None)
+        {
+            return payload;
         }
 
-        LZ4Level level = ToLz4Level(Compression);
-        return Api switch
+        LZ4Level level = ToLz4Level(compression);
+        return api switch
         {
-            CompressionApi.Pickler => LZ4Pickler.Pickle(_payload, level),
-            CompressionApi.Stream => CompressWithStream(_payload, level),
-            CompressionApi.Frame => CompressWithFrame(_payload, level),
-            _ => throw new ArgumentOutOfRangeException(nameof(Api), Api, message: null),
+            CompressionApi.Pickler => LZ4Pickler.Pickle(payload, level),
+            CompressionApi.Stream => CompressWithStream(payload, level),
+            CompressionApi.Frame => CompressWithFrame(payload, level),
+            _ => throw new ArgumentOutOfRangeException(nameof(api), api, message: null),
         };
     }
 
@@ -228,7 +322,7 @@ public class CompressionLevelBenchmarks
         _ => throw new ArgumentOutOfRangeException(nameof(option), option, message: null),
     };
 
-    private static byte[] BuildPayload(int length, PayloadContentType contentType)
+    public static byte[] BuildPayload(int length, PayloadContentType contentType)
     {
         var buffer = new byte[length];
         if (contentType == PayloadContentType.Random)
