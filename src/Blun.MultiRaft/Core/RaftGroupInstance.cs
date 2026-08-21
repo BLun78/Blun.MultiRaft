@@ -79,6 +79,14 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     private int _campaignInFlight;
     private int _snapshotWriteInFlight;
 
+    // Every fire-and-forget Task.Run below (campaign, per-peer replication, auto-compaction) is queued
+    // without its token so an already-cancelled shutdown can't leave the *InFlight flag stuck at 1 forever
+    // -- but that means DisposeAsync racing ahead while one of these is still mid-write is a real window, not
+    // a theoretical one: it can still be persisting a vote or a WAL segment when the log below gets disposed
+    // and the caller starts deleting the data directory out from under it. Tracked here so DisposeAsync can
+    // wait for every one of them to actually finish before it tears anything down.
+    private readonly ConcurrentBag<Task> _backgroundWork = [];
+
     /// <summary>Creates a group instance. It does nothing until <see cref="StartAsync"/> is called.</summary>
     /// <remarks>
     /// Takes ownership of <paramref name="wal"/> and disposes it with itself. Nothing else may write to that
@@ -784,7 +792,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             return;
         }
 
-        _ = Task.Run(
+        _backgroundWork.Add(Task.Run(
             async () =>
             {
                 try
@@ -805,7 +813,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     Volatile.Write(ref _campaignInFlight, 0);
                 }
-            });
+            }));
 
         // No token passed to Task.Run: an already-cancelled token would skip the delegate entirely and
         // leave _campaignInFlight latched at 1 forever. Cancellation is observed inside the body instead.
@@ -1018,6 +1026,27 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         }
 
         _commitWaiters.Clear();
+
+        // Every campaign / replication / auto-compaction Task.Run above is queued without _shutdown.Token
+        // precisely so an already-cancelled shutdown can't strand it (see _backgroundWork's own comment) --
+        // which means none of them stop just because the token above was cancelled. Waiting for them here,
+        // before the log is disposed, is what actually closes that window: without it, one of them can still
+        // be mid-write to a meta or WAL file below when the caller deletes the data directory this instance
+        // was using, in an already-cancelled state.
+        while (_backgroundWork.TryTake(out Task? work))
+        {
+#pragma warning disable CA1031 // Whatever a background task threw is either already logged inside it or an
+                               // OperationCanceledException from the shutdown just requested; either way,
+                               // shutdown must still proceed and dispose the log below.
+            try
+            {
+                await work.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+#pragma warning restore CA1031
+        }
 
         // The log is disposed here because this instance owns it: it is handed one at construction, nothing
         // else may write to it while the group lives, and the two lifetimes are the same. Leaving it open
@@ -1358,7 +1387,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             // No token passed to Task.Run itself: an already-cancelled token would skip the delegate and
             // leave peer.InFlight latched at 1 forever. ReplicateToPeerAsync observes _shutdown.Token inside
             // its own body instead.
-            _ = Task.Run(() => ReplicateToPeerAsync(peer));
+            _backgroundWork.Add(Task.Run(() => ReplicateToPeerAsync(peer)));
         }
     }
 
@@ -1999,7 +2028,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         // ApplyCommittedAsync, itself reachable from the tick loop, and CaptureAsync's cost is set by the
         // host's state machine, not by this library -- holding the tick hostage to however long that takes
         // would reopen exactly the shutdown-latency problem PushToAllPeers had.
-        _ = Task.Run(
+        _backgroundWork.Add(Task.Run(
             async () =>
             {
                 try
@@ -2020,7 +2049,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     Volatile.Write(ref _compactionInFlight, 0);
                 }
-            });
+            }));
 
         // No token passed to Task.Run: the delegate is what clears _compactionInFlight, and Task.Run with an
         // already-cancelled token never runs its delegate at all -- the flag would latch at 1 forever.
