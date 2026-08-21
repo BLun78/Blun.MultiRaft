@@ -68,25 +68,29 @@ zu `Blun.MultiRaft.Wal`, das bleibt storage-only und referenziert keine Kompress
 `Directory.Packages.props` versionieren (bereits als `1.3.8` im Benchmark-Projekt gepinnt, dieselbe Version
 für Core übernehmen).
 
-### 4. `RaftGroupOptions`: `PayloadCompression`-Flag
+### 4. `RaftGroupOptions`: `PayloadCompression`-Schalter (Enum, nicht Bool)
 
 ```csharp
 /// <summary>
 /// Whether AppendAsync tries LZ4 compression on each command payload, keeping the compressed form only
-/// when it is smaller than the original. Off by default. See doc/raft-payload-compression.md for why this
-/// is adaptive per entry rather than a size threshold, and why there is only one level to turn on.
+/// when it is smaller than the original. <see cref="RaftPayloadCompression.None"/> (the default) turns the
+/// attempt off entirely. See doc/raft-payload-compression.md for why the actual per-entry choice is
+/// adaptive rather than a size threshold, and why there is only one level to switch on.
 /// </summary>
-public bool PayloadCompression { get; init; }
+public RaftPayloadCompression PayloadCompression { get; init; } = RaftPayloadCompression.None;
 ```
 
-Bool statt Enum an dieser Stelle — es gibt nur eine Kompressionsvariante, ein Enum mit zwei Werten (`None`/
-`Lz4Fast`) wäre hier reine Indirektion. Das `RaftPayloadCompression`-Enum aus Schritt 1 lebt im Header, wo es
-den Wire-Zustand *jedes einzelnen Eintrags* trägt (weil die Entscheidung pro Eintrag adaptiv fällt, nicht
-pro Gruppe fix ist) — das ist ein anderer Zweck als diese Gruppen-Option, die nur an/aus schaltet.
+Dieselbe Enum wie im Header (Schritt 1) — kein zweiter Typ, kein Bool. `RaftGroupOptions.PayloadCompression`
+ist der An/Aus-Schalter pro Gruppe (`None` = Feature aus, `Lz4Fast` = Feature an); `RaftEntryHeader.Compression`
+trägt den tatsächlichen Wire-Zustand *jedes einzelnen Eintrags*, nachdem die adaptive Entscheidung
+(Schritt 5) gefallen ist — bei ausgeschaltetem Feature ist das immer `None`, bei eingeschaltetem Feature
+`Lz4Fast` nur für die Einträge, bei denen sich Kompression tatsächlich gelohnt hat, sonst ebenfalls `None`.
+Beide Stellen nutzen dieselbe Enum, weil es dieselbe Bedeutung ist ("welche Kompression liegt hier vor"),
+nur an zwei verschiedenen Punkten im Datenfluss (Konfigurationsabsicht vs. tatsächliches Ergebnis).
 
 ### 5. Kompression: adaptiv in `RaftGroupInstance.AppendAsync`
 
-Vor dem WAL-Append, wenn `PayloadCompression == true`:
+Vor dem WAL-Append, wenn `PayloadCompression != RaftPayloadCompression.None`:
 
 1. `LZ4Frame.Encode(payload.Span, buffer.Span, LZ4Level.L00_FAST, extraMemory: 0)` in einen Puffer der
    Größe `LZ4Codec.MaximumOutputSize(payload.Length) + 64` (Frame-Header/Footer-Marge, siehe
@@ -134,7 +138,7 @@ Wochen mit tausenden Gruppen zu Fragmentierung summieren kann. Diese Einstellung
 - Adaptiver Fallback: ein Payload, für den `LZ4Frame.Encode` kein kleineres Ergebnis liefert (z.B.
   vorkomprimierte/zufällige Bytes knapp über der Kompressionsschwelle), landet mit `Compression = None`
   bit-identisch im WAL — nicht mit einem größeren komprimierten Blob.
-- `PayloadCompression = false` (Default) verhält sich exakt wie vor dieser Änderung — Regressionstest gegen
+- `PayloadCompression = RaftPayloadCompression.None` (Default) verhält sich exakt wie vor dieser Änderung — Regressionstest gegen
   bestehende `WalTests.cs`/`RaftGroupInstance`-Tests.
 - Contract-Test-Erweiterung in `WalTests.cs`, falls dort der Header direkt geprüft wird (`Compression`-Feld
   muss für bestehende Tests weiterhin `None` sein).
