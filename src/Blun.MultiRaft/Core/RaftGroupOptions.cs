@@ -61,6 +61,29 @@ public sealed class RaftGroupOptions
     /// <summary>Interval between heartbeats from a leader. Must be well below <see cref="ElectionTimeout"/>.</summary>
     public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromMilliseconds(75);
 
+    /// <summary>
+    /// Heartbeat interval a leader falls back to once <see cref="ElectionTimeout"/> has passed with no new
+    /// entry appended. <see langword="null"/> (the default) disables this — the leader always heartbeats at
+    /// <see cref="HeartbeatInterval"/>, busy or not.
+    /// </summary>
+    /// <remarks>
+    /// Real replication is never delayed by this: <see cref="RaftGroupInstance.AppendAsync"/> pushes to every
+    /// peer immediately regardless of the tick loop, so this only stretches the cadence of empty keep-alive
+    /// heartbeats sent while nothing is happening. For a group that is idle for long stretches — most queues,
+    /// most of the time — those empty heartbeats are pure 24/7 network cost with no data to show for it.
+    /// <para>
+    /// Must stay below <see cref="ElectionTimeout"/>, same as <see cref="HeartbeatInterval"/> — a follower's
+    /// own timeout does not know this group went idle, so nothing about the safety margin between heartbeats
+    /// and elections changes, only how large that margin is allowed to be used. <see cref="RaftGroupInstance"/>'s
+    /// constructor throws <see cref="ArgumentOutOfRangeException"/> if it is set at or above
+    /// <see cref="ElectionTimeout"/>, or below <see cref="HeartbeatInterval"/> (which would make it not idle
+    /// at all). A group running <see cref="CheckQuorum"/> should leave extra margin: that check's own window
+    /// is exactly one <see cref="ElectionTimeout"/>, so an idle interval close to it risks a leader stepping
+    /// aside from its own slow heartbeat rather than from real silence.
+    /// </para>
+    /// </remarks>
+    public TimeSpan? IdleHeartbeatInterval { get; init; }
+
     /// <summary>Maximum entries carried by one replication round.</summary>
     public int MaxEntriesPerAppend { get; init; } = 256;
 

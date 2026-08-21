@@ -72,6 +72,11 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
     private int _transferInProgress;
     private NodeId _transferTarget;
     private long _nextHeartbeat;
+
+    // Updated whenever a new entry is appended to this leader's own log (AppendCoreAsync). Read by TickAsync
+    // to decide whether HeartbeatInterval or the slower IdleHeartbeatInterval applies -- see the option's doc
+    // comment for why this never delays real replication, only the cadence of empty keep-alives.
+    private long _lastAppendActivity;
     private long _waiterSequence;
     private bool _started;
     private bool _disposed;
@@ -114,6 +119,19 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         _options = options ?? new RaftGroupOptions();
         _time = timeProvider ?? TimeProvider.System;
         _logger = logger ?? NullLogger.Instance;
+
+        if (_options.IdleHeartbeatInterval is { } idle
+            && (idle >= _options.ElectionTimeout || idle < _options.HeartbeatInterval))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                idle,
+                $"{nameof(RaftGroupOptions.IdleHeartbeatInterval)} must be between " +
+                $"{nameof(RaftGroupOptions.HeartbeatInterval)} ({_options.HeartbeatInterval}) and " +
+                $"{nameof(RaftGroupOptions.ElectionTimeout)} ({_options.ElectionTimeout}), exclusive of the latter.");
+        }
+
+        _lastAppendActivity = _time.GetTimestamp();
     }
 
     /// <summary>Identity of this group.</summary>
@@ -746,7 +764,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
 
             if (now >= Volatile.Read(ref _nextHeartbeat))
             {
-                Volatile.Write(ref _nextHeartbeat, now + ToTicks(_options.HeartbeatInterval));
+                Volatile.Write(ref _nextHeartbeat, now + ToTicks(EffectiveHeartbeatInterval(now)));
                 PushToAllPeers();
             }
 
@@ -760,6 +778,24 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         }
 
         await ValueTask.CompletedTask.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <see cref="RaftGroupOptions.IdleHeartbeatInterval"/> once a full <see cref="RaftGroupOptions.ElectionTimeout"/>
+    /// has passed with no entry appended, otherwise <see cref="RaftGroupOptions.HeartbeatInterval"/>. The
+    /// constructor already rejected an <c>IdleHeartbeatInterval</c> that would leave less safety margin than
+    /// <c>HeartbeatInterval</c> has today, so switching between the two changes only how often an empty
+    /// keep-alive goes out, never whether a follower's own election timeout is respected.
+    /// </summary>
+    private TimeSpan EffectiveHeartbeatInterval(long now)
+    {
+        if (_options.IdleHeartbeatInterval is not { } idle)
+        {
+            return _options.HeartbeatInterval;
+        }
+
+        long sinceActivity = now - Volatile.Read(ref _lastAppendActivity);
+        return sinceActivity >= ToTicks(_options.ElectionTimeout) ? idle : _options.HeartbeatInterval;
     }
 
     /// <summary>
@@ -1111,6 +1147,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             index = _wal.LastIndex + 1;
             var header = new RaftEntryHeader(term, index, kind, payload.Length, _time.GetUtcNow().UtcTicks, applicationTag);
             await _wal.AppendAsync(header, payload, cancellationToken).ConfigureAwait(false);
+            Volatile.Write(ref _lastAppendActivity, _time.GetTimestamp());
 
             if (kind == RaftEntryKind.Membership)
             {
