@@ -38,9 +38,17 @@ internal sealed class RaftStreamSession : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown;
 
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<RaftFrame>> _pending = new();
-    private readonly ConcurrentDictionary<ulong, Channel<ReadOnlyMemory<byte>>> _inboundSnapshots = new();
+    private readonly ConcurrentDictionary<ulong, InboundSnapshot> _inboundSnapshots = new();
+    private readonly int _maxConcurrentInboundSnapshots;
+    private readonly long _maxInboundSnapshotBytes;
 
     private long _correlation;
+
+    /// <summary>Default cap on simultaneously-open inbound snapshot transfers per session (SEC-003).</summary>
+    public const int DefaultMaxConcurrentInboundSnapshots = 4;
+
+    /// <summary>Default per-snapshot byte budget (SEC-003): a peer sending past this is rejected, not buffered.</summary>
+    public const long DefaultMaxInboundSnapshotBytes = 512L * 1024 * 1024;
 
     public RaftStreamSession(
         IAsyncStreamWriter<RaftFrame> writer,
@@ -48,13 +56,17 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         IRaftProtocolListener listener,
         CancellationToken cancellationToken,
         ILogger? logger = null,
-        NodeId? peerId = null)
+        NodeId? peerId = null,
+        int maxConcurrentInboundSnapshots = DefaultMaxConcurrentInboundSnapshots,
+        long maxInboundSnapshotBytes = DefaultMaxInboundSnapshotBytes)
     {
         _writer = writer;
         _reader = reader;
         _listener = listener;
         _logger = logger ?? NullLogger.Instance;
         PeerId = peerId;
+        _maxConcurrentInboundSnapshots = maxConcurrentInboundSnapshots;
+        _maxInboundSnapshotBytes = maxInboundSnapshotBytes;
         _shutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _outbound = Channel.CreateUnbounded<RaftFrame>(new UnboundedChannelOptions
         {
@@ -242,9 +254,9 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
         _pending.Clear();
 
-        foreach (Channel<ReadOnlyMemory<byte>> channel in _inboundSnapshots.Values)
+        foreach (InboundSnapshot tracked in _inboundSnapshots.Values)
         {
-            channel.Writer.TryComplete();
+            tracked.Channel.Writer.TryComplete();
         }
 
         _inboundSnapshots.Clear();
@@ -387,18 +399,41 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
     private void HandleSnapshotChunk(RaftFrame frame)
     {
-        if (!_inboundSnapshots.TryGetValue(frame.CorrelationId, out Channel<ReadOnlyMemory<byte>>? channel))
+        if (!_inboundSnapshots.TryGetValue(frame.CorrelationId, out InboundSnapshot? tracked))
         {
             return;
         }
 
         if (frame.SnapshotChunk.Last)
         {
-            channel.Writer.TryComplete();
+            tracked.Channel.Writer.TryComplete();
             return;
         }
 
-        channel.Writer.TryWrite(frame.SnapshotChunk.Data.ToByteArray());
+        long total = Interlocked.Add(ref tracked.BytesWritten, frame.SnapshotChunk.Data.Length);
+        if (total > _maxInboundSnapshotBytes)
+        {
+            // Budget exceeded (SEC-003): stop retaining chunks for this transfer and fault the channel so the
+            // awaiting OnInstallSnapshotAsync call observes a definite failure instead of hanging or growing
+            // without bound. Removed here rather than left for the handler's finally, so a chunk arriving
+            // after this one finds no tracked entry and is dropped for free.
+            tracked.BudgetExceeded = true;
+            tracked.Channel.Writer.TryComplete(
+                new InvalidOperationException($"Inbound snapshot exceeded the {_maxInboundSnapshotBytes}-byte budget."));
+            _inboundSnapshots.TryRemove(frame.CorrelationId, out _);
+            GrpcLog.SnapshotBudgetExceeded(_logger, frame.GroupId, _maxInboundSnapshotBytes);
+            return;
+        }
+
+        tracked.Channel.Writer.TryWrite(frame.SnapshotChunk.Data.ToByteArray());
+    }
+
+    /// <summary>Tracks one inbound snapshot transfer's channel and running byte total (SEC-003).</summary>
+    private sealed class InboundSnapshot(Channel<ReadOnlyMemory<byte>> channel)
+    {
+        public Channel<ReadOnlyMemory<byte>> Channel { get; } = channel;
+        public long BytesWritten;
+        public bool BudgetExceeded;
     }
 
     private async Task HandleRequestAsync(RaftFrame frame)
@@ -502,14 +537,27 @@ internal sealed class RaftStreamSession : IAsyncDisposable
                         return;
                     }
 
+                    // A cap on simultaneous transfers, not on transfer size (SEC-003): an unbounded number of
+                    // concurrent InstallSnapshot frames is itself a memory-DoS surface even before any chunk
+                    // arrives, since each one holds a channel and an in-flight handler.
+                    if (_inboundSnapshots.Count >= _maxConcurrentInboundSnapshots)
+                    {
+                        response.InstallSnapshotReply = new InstallSnapshotReply { Success = false };
+                        break;
+                    }
+
                     // The channel is registered before the handler runs, so chunks arriving while the handler
-                    // is still starting up are buffered rather than dropped.
+                    // is still starting up are buffered rather than dropped. Left unbounded deliberately: a
+                    // bounded channel's blocking write would stall this connection's single reader loop, which
+                    // every other group sharing it depends on (see SEC-003). The byte budget tracked in
+                    // HandleSnapshotChunk is what actually bounds memory instead.
                     var body = Channel.CreateUnbounded<ReadOnlyMemory<byte>>(new UnboundedChannelOptions
                     {
                         SingleReader = true,
                         SingleWriter = true,
                     });
-                    _inboundSnapshots[frame.CorrelationId] = body;
+                    var tracked = new InboundSnapshot(body);
+                    _inboundSnapshots[frame.CorrelationId] = tracked;
 
                     try
                     {
@@ -518,6 +566,12 @@ internal sealed class RaftStreamSession : IAsyncDisposable
                             .OnInstallSnapshotAsync(request, body.Reader.ReadAllAsync(_shutdown.Token), _shutdown.Token)
                             .ConfigureAwait(false);
                         response.InstallSnapshotReply = RaftFrameCodec.ToProto(in result);
+                    }
+                    catch (InvalidOperationException) when (tracked.BudgetExceeded)
+                    {
+                        // HandleSnapshotChunk already logged and dropped the transfer; answer instead of
+                        // leaving the sender to time out, since the rejection is definite, not transient.
+                        response.InstallSnapshotReply = new InstallSnapshotReply { Success = false };
                     }
                     finally
                     {

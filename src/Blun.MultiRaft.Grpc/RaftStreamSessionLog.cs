@@ -33,4 +33,10 @@ internal static partial class GrpcLog
         string payload,
         ulong claimed,
         ulong authenticated);
+
+    [LoggerMessage(
+        EventId = 1303,
+        Level = LogLevel.Warning,
+        Message = "Raft group {Group}: an inbound snapshot exceeded the {BudgetBytes}-byte budget and was rejected.")]
+    public static partial void SnapshotBudgetExceeded(ILogger logger, ulong group, long budgetBytes);
 }
