@@ -91,7 +91,7 @@ public static class RaftKestrelExtensions
                 listen.Protocols = protocol == RaftGrpcProtocol.Http3
                     ? HttpProtocols.Http3
                     : HttpProtocols.Http2;
-
+                
                 configureListen?.Invoke(listen);
             });
     }

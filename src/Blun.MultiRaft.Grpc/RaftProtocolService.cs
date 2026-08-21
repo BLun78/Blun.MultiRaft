@@ -11,6 +11,9 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using System.IO.Compression;
+using Blun.MultiRaft.Grpc.Compression;
+using GzipCompressionProvider = Grpc.Net.Compression.GzipCompressionProvider;
 
 namespace Blun.MultiRaft.Grpc;
 
@@ -99,7 +102,20 @@ public static class RaftProtocolServiceExtensions
         Func<IServiceProvider, IRaftPeerAuthenticator>? authenticatorFactory = null,
         int maxReceiveMessageBytes = DefaultMaxReceiveMessageBytes)
     {
-        services.AddGrpc(options => options.MaxReceiveMessageSize = maxReceiveMessageBytes);
+        services.AddGrpc(options =>
+        {
+            options.MaxReceiveMessageSize = maxReceiveMessageBytes;
+            options.ResponseCompressionLevel = CompressionLevel.Fastest;
+            options.CompressionProviders =
+            [
+#if NET11_0_OR_GREATER
+                new ZstandardCompressionProvider(options.ResponseCompressionLevel.Value),
+#endif
+                new BrotliCompressionProvider(options.ResponseCompressionLevel.Value),
+                new GzipCompressionProvider(options.ResponseCompressionLevel.Value),
+            ];
+
+        });
         services.AddSingleton(listenerFactory);
         if (authenticatorFactory is not null)
         {

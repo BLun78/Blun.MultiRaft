@@ -351,7 +351,16 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
             // behind the ones already in flight. Set unconditionally -- it does nothing under HTTP/3, which
             // has no per-connection stream ceiling to begin with, and costs nothing when the limit is never
             // approached, which is the common case since this transport normally holds one stream per peer.
-            var handler = new SocketsHttpHandler { EnableMultipleHttp2Connections = true };
+            var handler = new SocketsHttpHandler
+            {
+                PreAuthenticate = true,
+                AllowAutoRedirect = false,
+                MaxConnectionsPerServer = 10000,    
+                EnableMultipleHttp2Connections = true,
+                EnableMultipleHttp3Connections = true,
+
+                KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+            };
 
             // UserAgentHandler sits between the socket handler and the HttpClient so it can rewrite the
             // request's User-Agent header after grpc-dotnet has already set its own token on it -- see
