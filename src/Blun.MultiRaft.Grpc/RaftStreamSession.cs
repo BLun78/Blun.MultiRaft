@@ -47,12 +47,14 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         IAsyncStreamReader<RaftFrame> reader,
         IRaftProtocolListener listener,
         CancellationToken cancellationToken,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        NodeId? peerId = null)
     {
         _writer = writer;
         _reader = reader;
         _listener = listener;
         _logger = logger ?? NullLogger.Instance;
+        PeerId = peerId;
         _shutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _outbound = Channel.CreateUnbounded<RaftFrame>(new UnboundedChannelOptions
         {
@@ -69,6 +71,14 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
     /// <summary>Completes when the peer closed the stream or the session was cancelled.</summary>
     public Task ReaderLoop { get; }
+
+    /// <summary>
+    /// The identity this connection authenticated as, when an <see cref="IRaftPeerAuthenticator"/> is
+    /// configured on the receiving end; <c>null</c> otherwise (including on the client side, which asserts its
+    /// own identity via the outbound header rather than validating one). When set, every inbound request frame
+    /// carrying a claimed sender is checked against it in <see cref="HandleRequestAsync"/>.
+    /// </summary>
+    public NodeId? PeerId { get; }
 
     public async ValueTask<AppendEntriesResponse> AppendEntriesAsync(
         AppendEntriesRequest request,
@@ -358,6 +368,23 @@ internal sealed class RaftStreamSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// True if <paramref name="claimed"/> may be dispatched: either this session is unauthenticated
+    /// (<see cref="PeerId"/> is <c>null</c>, the pre-SEC-001 default), or it matches the authenticated
+    /// identity. A frame claiming to be a different node than the one that opened this connection is dropped
+    /// rather than trusted — accepting it would let an authenticated-but-malicious peer act as anyone.
+    /// </summary>
+    private bool IsClaimedSenderTrusted(ulong group, string payload, ulong claimed)
+    {
+        if (PeerId is not { } peerId || peerId.Value == claimed)
+        {
+            return true;
+        }
+
+        GrpcLog.PeerIdentityMismatch(_logger, group, payload, claimed, peerId.Value);
+        return false;
+    }
+
     private void HandleSnapshotChunk(RaftFrame frame)
     {
         if (!_inboundSnapshots.TryGetValue(frame.CorrelationId, out Channel<ReadOnlyMemory<byte>>? channel))
@@ -385,6 +412,11 @@ internal sealed class RaftStreamSession : IAsyncDisposable
             {
                 case RaftFrame.PayloadOneofCase.AppendEntries:
                 {
+                    if (!IsClaimedSenderTrusted(group.Value, "AppendEntries", frame.AppendEntries.Leader))
+                    {
+                        return;
+                    }
+
                     AppendEntriesRequest request = RaftFrameCodec.ToDomain(group, frame.AppendEntries);
                     AppendEntriesResponse result = await _listener
                         .OnAppendEntriesAsync(request, Decode(frame.AppendEntries), _shutdown.Token)
@@ -395,6 +427,11 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
                 case RaftFrame.PayloadOneofCase.Vote:
                 {
+                    if (!IsClaimedSenderTrusted(group.Value, "Vote", frame.Vote.Candidate))
+                    {
+                        return;
+                    }
+
                     VoteRequest request = RaftFrameCodec.ToDomain(group, frame.Vote);
                     VoteResponse result = await _listener
                         .OnRequestVoteAsync(request, _shutdown.Token)
@@ -425,6 +462,11 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
                 case RaftFrame.PayloadOneofCase.NodeLoad:
                 {
+                    if (!IsClaimedSenderTrusted(group.Value, "NodeLoad", frame.NodeLoad.Node))
+                    {
+                        return;
+                    }
+
                     // A transport whose listener does not do cluster management still answers, with an empty
                     // reply. The sender treats a lost report as normal anyway, and leaving the call to time
                     // out would be a worse way of saying the same thing.
@@ -455,6 +497,11 @@ internal sealed class RaftStreamSession : IAsyncDisposable
 
                 case RaftFrame.PayloadOneofCase.InstallSnapshot:
                 {
+                    if (!IsClaimedSenderTrusted(group.Value, "InstallSnapshot", frame.InstallSnapshot.Leader))
+                    {
+                        return;
+                    }
+
                     // The channel is registered before the handler runs, so chunks arriving while the handler
                     // is still starting up are buffered rather than dropped.
                     var body = Channel.CreateUnbounded<ReadOnlyMemory<byte>>(new UnboundedChannelOptions

@@ -24,12 +24,19 @@ namespace Blun.MultiRaft.Grpc;
 /// </remarks>
 public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
 {
+    private const string AuthHeaderName = "x-raft-auth";
+
     private readonly IRaftProtocolListener _listener;
+    private readonly IRaftPeerAuthenticator? _authenticator;
     private readonly ILogger<RaftProtocolService>? _logger;
 
-    public RaftProtocolService(IRaftProtocolListener listener, ILogger<RaftProtocolService>? logger = null)
+    public RaftProtocolService(
+        IRaftProtocolListener listener,
+        IRaftPeerAuthenticator? authenticator = null,
+        ILogger<RaftProtocolService>? logger = null)
     {
         _listener = listener ?? throw new ArgumentNullException(nameof(listener));
+        _authenticator = authenticator;
         _logger = logger;
     }
 
@@ -39,12 +46,29 @@ public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
         IServerStreamWriter<RaftFrame> responseStream,
         ServerCallContext context)
     {
+        NodeId? peerId = null;
+        if (_authenticator is not null)
+        {
+            string? header = context.RequestHeaders.GetValue(AuthHeaderName);
+            peerId = await _authenticator.AuthenticateAsync(header, context.CancellationToken).ConfigureAwait(false);
+            if (peerId is null)
+            {
+                if (_logger is not null)
+                {
+                    GrpcLog.PeerAuthenticationFailed(_logger);
+                }
+
+                throw new RpcException(new Status(StatusCode.Unauthenticated, "unknown or invalid peer"));
+            }
+        }
+
         await using var session = new RaftStreamSession(
             responseStream,
             requestStream,
             _listener,
             context.CancellationToken,
-            _logger);
+            _logger,
+            peerId);
 
         // The call has to stay open as long as the peer keeps the stream: returning would close it and force
         // a reconnect on every group sharing it.
@@ -55,13 +79,23 @@ public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
 /// <summary>Wiring helpers so a host can expose the transport in two lines.</summary>
 public static class RaftProtocolServiceExtensions
 {
-    /// <summary>Registers the service and the listener it dispatches to.</summary>
+    /// <summary>
+    /// Registers the service and the listener it dispatches to. Pass <paramref name="authenticatorFactory"/> to
+    /// require every inbound session to authenticate — see SEC-001 in <c>doc/audit</c> for what is at stake
+    /// when it is left null.
+    /// </summary>
     public static IServiceCollection AddRaftProtocol(
         this IServiceCollection services,
-        Func<IServiceProvider, IRaftProtocolListener> listenerFactory)
+        Func<IServiceProvider, IRaftProtocolListener> listenerFactory,
+        Func<IServiceProvider, IRaftPeerAuthenticator>? authenticatorFactory = null)
     {
         services.AddGrpc();
         services.AddSingleton(listenerFactory);
+        if (authenticatorFactory is not null)
+        {
+            services.AddSingleton(authenticatorFactory);
+        }
+
         return services;
     }
 
