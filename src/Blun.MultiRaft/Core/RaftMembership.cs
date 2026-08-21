@@ -42,7 +42,15 @@ public readonly record struct MembershipChange(MembershipChangeKind Kind, NodeId
 
     /// <summary>Reads a change back out of a log entry payload.</summary>
     public static MembershipChange Read(ReadOnlySpan<byte> source)
-        => new((MembershipChangeKind)source[0], new NodeId(BinaryPrimitives.ReadUInt64LittleEndian(source[1..])));
+    {
+        if (source.Length < PayloadSize)
+        {
+            throw new InvalidOperationException(
+                $"A membership entry payload must be {PayloadSize} bytes, got {source.Length}.");
+        }
+
+        return new((MembershipChangeKind)source[0], new NodeId(BinaryPrimitives.ReadUInt64LittleEndian(source[1..])));
+    }
 
     /// <summary>Allocates the nine-byte payload for this change.</summary>
     public byte[] ToPayload()
@@ -130,7 +138,9 @@ public sealed record RaftMembership
 
         int voterCount = BinaryPrimitives.ReadInt32LittleEndian(source);
         int learnerCount = BinaryPrimitives.ReadInt32LittleEndian(source[4..]);
-        if (voterCount < 0 || learnerCount < 0 || source.Length < 8 + ((voterCount + learnerCount) * 8))
+        const int maxMembers = 1_000_000;
+        long total = (long)voterCount + learnerCount;
+        if (voterCount < 0 || learnerCount < 0 || total > maxMembers || source.Length < 8 + (total * 8))
         {
             return Empty;
         }
