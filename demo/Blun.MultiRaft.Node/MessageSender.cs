@@ -36,6 +36,12 @@ internal sealed class SendJob(int total, int size, TimeSpan interval)
 
     public CancellationTokenSource Cancellation { get; } = new();
 
+    /// <summary>
+    /// The run's own task, so <see cref="MessageSender.DisposeAsync"/> can wait for it to actually stop
+    /// touching <see cref="Cancellation"/> before disposing that CTS out from under it (D-003).
+    /// </summary>
+    public Task? Runner { get; set; }
+
     public TimeSpan Elapsed { get; private set; }
 
     public void Progress() => Interlocked.Increment(ref _sent);
@@ -102,10 +108,20 @@ internal sealed class MessageSender(MultiRaftHost host, ILogger logger) : IAsync
         }
 
         var job = new SendJob(count, size, interval);
+
+        // D-003 side note: the previous run's SendJob (and its CancellationTokenSource) is dropped here
+        // without disposing it. Harmless -- a CTS with no registrations is plain GC-collectible, and Stop()
+        // only ever cancels the one still reachable through _jobs -- but disposing it keeps the symmetry with
+        // every run's Cancellation getting a matching Dispose somewhere, rather than only the current one.
+        if (_jobs.TryGetValue(group, out SendJob? previous))
+        {
+            previous.Cancellation.Dispose();
+        }
+
         _jobs[group] = job;
 
         SendLog.Started(logger, group, count, (long)interval.TotalMilliseconds, size);
-        _ = Task.Run(() => RunAsync(instance, job), CancellationToken.None);
+        job.Runner = Task.Run(() => RunAsync(instance, job), CancellationToken.None);
 
         return new { group, started = true, total = count, intervalMs = interval.TotalMilliseconds, size };
     }
@@ -184,6 +200,14 @@ internal sealed class MessageSender(MultiRaftHost host, ILogger logger) : IAsync
         {
             // Cancelled, either by request or by shutdown.
         }
+        catch (ObjectDisposedException)
+        {
+            // D-003: DisposeAsync now awaits this task before disposing job.Cancellation (see below), which
+            // closes the window that made this reachable. Kept as a backstop rather than removed -- the run
+            // task isn't the only thing that could still touch a disposed CTS on some future code path, and
+            // the alternative (let it escape into this Task.Run's unobserved exception) is a worse failure
+            // mode than a job that quietly stops early.
+        }
         finally
         {
             job.Finish();
@@ -196,6 +220,28 @@ internal sealed class MessageSender(MultiRaftHost host, ILogger logger) : IAsync
         foreach (SendJob job in _jobs.Values)
         {
             await job.Cancellation.CancelAsync().ConfigureAwait(false);
+
+            // D-003: RunAsync keeps reading job.Cancellation.Token after this point (WaitForNextTickAsync in
+            // particular sits outside the loop body's own try/catch), so disposing the CTS immediately after
+            // cancelling it raced the run -- RaftNodeHost.DisposeAsync disposes its groups only after this
+            // sender, specifically so a run in progress isn't still appending into a group being torn down,
+            // but that promise meant nothing if the run could still be mid-write here regardless. Waiting for
+            // the task first is what actually makes the ordering true rather than just written down.
+            if (job.Runner is not null)
+            {
+                try
+                {
+                    await job.Runner.ConfigureAwait(false);
+                }
+#pragma warning disable CA1031 // Whatever RunAsync threw is either already recorded on job.Error or an
+                               // OperationCanceledException from the cancel just above; either way, shutdown
+                               // must still dispose every job's CTS below.
+                catch (Exception)
+                {
+                }
+#pragma warning restore CA1031
+            }
+
             job.Cancellation.Dispose();
         }
 
