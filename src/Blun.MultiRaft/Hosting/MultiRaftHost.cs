@@ -189,6 +189,10 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         {
             await _walFactory.DeleteAsync(group, cancellationToken).ConfigureAwait(false);
             await _metaStore.DeleteAsync(group, cancellationToken).ConfigureAwait(false);
+            if (_snapshots is not null)
+            {
+                await _snapshots.DeleteAsync(group, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -358,9 +362,10 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         {
             return false;
         }
-        catch (Exception ex) when (ex is IOException or InvalidOperationException)
+        catch (Exception ex)
         {
-            // One sick group must never stop the clock for the thousands beside it.
+            // One sick group must never stop the clock for the thousands beside it: catch everything
+            // except cancellation, or a single bad tick kills the clock for every other group on this node.
             HostLog.TickFailed(_logger, ex, instance.Group.Value);
             return true;
         }

@@ -598,10 +598,11 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
                 {
                     return;
                 }
-                catch (Exception ex) when (ex is IOException or InvalidOperationException)
+                catch (Exception ex)
                 {
                     // The cluster group being briefly unusable is normal -- an election, a partition, a peer
-                    // restarting. The loop has to survive all of them; the next pass is seconds away.
+                    // restarting. The loop has to survive all of them, not just IOException/
+                    // InvalidOperationException; the next pass is seconds away.
                     ClusterLog.PassFailed(_logger, ex, _options.Self.Value);
                 }
             }

@@ -784,8 +784,10 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     // Shutting down.
                 }
-                catch (Exception ex) when (ex is IOException or InvalidOperationException)
+                catch (Exception ex)
                 {
+                    // One sick group must never stop the clock for the thousands beside it: catch
+                    // everything except cancellation so a candidacy failure never propagates.
                     Log.ElectionFailed(_logger, ex, Group.Value, Self.Value);
                 }
                 finally
@@ -1126,8 +1128,11 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                     used = 0;
                     if (entry.Payload.Length > buffer.Length)
                     {
+                        // Rent before returning: if Rent throws, the old buffer must not already be back in
+                        // the pool, or two callers end up sharing it.
+                        byte[] larger = ArrayPool<byte>.Shared.Rent(entry.Payload.Length);
                         ArrayPool<byte>.Shared.Return(buffer);
-                        buffer = ArrayPool<byte>.Shared.Rent(entry.Payload.Length);
+                        buffer = larger;
                     }
                 }
 
@@ -1909,8 +1914,10 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     // Shutting down.
                 }
-                catch (Exception ex) when (ex is IOException or InvalidOperationException)
+                catch (Exception ex)
                 {
+                    // Same reasoning as the campaign catch above: a background loop must survive whatever
+                    // the host's state machine or storage throws.
                     Log.AutoCompactionFailed(_logger, ex, Group.Value);
                 }
                 finally
