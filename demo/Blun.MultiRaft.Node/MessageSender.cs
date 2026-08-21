@@ -120,19 +120,25 @@ internal sealed class MessageSender(MultiRaftHost host, ILogger logger) : IAsync
 
     private async Task RunAsync(RaftGroupInstance instance, SendJob job)
     {
-        byte[] payload = new byte[job.Size];
-
-        // Something recognisable rather than zeroes: a reader looking at a segment on disk should be able to
-        // tell demo traffic from anything else, and a compressible run of zeroes would flatter the numbers.
-        for (int i = 16; i < payload.Length; i++)
-        {
-            payload[i] = (byte)('a' + (i % 26));
-        }
-
         using var timer = new PeriodicTimer(job.Interval);
 
         try
         {
+            // SEC-006: allocated inside the try, not before it. job.Size is validated by the HTTP handler
+            // before Start() is ever called, but the allocation stayed here regardless -- an exception thrown
+            // before this try block would skip the finally below, leaving job.Running stuck at true forever
+            // (the next request for this group would be refused with "a run is already in progress" until the
+            // process restarted).
+            byte[] payload = new byte[job.Size];
+
+            // Something recognisable rather than zeroes: a reader looking at a segment on disk should be able
+            // to tell demo traffic from anything else, and a compressible run of zeroes would flatter the
+            // numbers.
+            for (int i = 16; i < payload.Length; i++)
+            {
+                payload[i] = (byte)('a' + (i % 26));
+            }
+
             for (int i = 0; i < job.Total; i++)
             {
                 if (job.Cancellation.IsCancellationRequested)

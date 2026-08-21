@@ -142,10 +142,30 @@ app.MapPost(
 // Dummy traffic, so the write-ahead log has something in it to look at. Leader only -- an append goes to the
 // leader -- and the run happens on the node, one message every `intervalMs`, rather than as one request per
 // message from outside.
+//
+// size/count are rejected outright rather than silently clamped (SEC-006): a size above the WAL's own
+// message cap allocated *before* the run's try block used to OOM the process and leave the job latched
+// "running" forever, since the abort happened before job.Finish() could run. A 400 makes the mistake visible
+// instead of bricking the generator for that group until the process restarts.
 app.MapPost(
     "/groups/{group}/messages",
-    (RaftNodeHost host, ulong group, int? count, int? intervalMs, int? size)
-        => Results.Json(host.StartSending(group, count ?? 100, intervalMs ?? 10, size ?? 256)));
+    (RaftNodeHost host, ulong group, int? count, int? intervalMs, int? size) =>
+    {
+        int resolvedCount = count ?? 100;
+        int resolvedSize = size ?? 256;
+
+        if (resolvedCount is < 1 or > TrafficLimits.MaxMessageCount)
+        {
+            return Results.BadRequest($"count must be between 1 and {TrafficLimits.MaxMessageCount}.");
+        }
+
+        if (resolvedSize is < 16 or > SegmentedRaftWalOptions.MaxMessageBytes)
+        {
+            return Results.BadRequest($"size must be between 16 and {SegmentedRaftWalOptions.MaxMessageBytes} bytes.");
+        }
+
+        return Results.Json(host.StartSending(group, resolvedCount, intervalMs ?? 10, resolvedSize));
+    });
 
 app.MapDelete(
     "/groups/{group}/messages",
@@ -179,3 +199,11 @@ static T ParseConfigValue<T>(
 }
 
 delegate bool TryParseHandler<T>(string? s, IFormatProvider? provider, out T result);
+
+// SEC-006: an upper bound on how many messages one traffic-generator run will send. Not tied to any WAL
+// limit -- it exists only so a request typo (or a hostile POST, see SEC-005) can't schedule a run that
+// pins a group's generator for days instead of the demo's intended "a few thousand at most".
+internal static class TrafficLimits
+{
+    public const int MaxMessageCount = 1_000_000;
+}
