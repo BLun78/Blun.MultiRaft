@@ -73,7 +73,13 @@ public sealed class ClusterModeStore
         int read = await RandomAccess.ReadAsync(handle, buffer, 0, cancellationToken).ConfigureAwait(false);
         if (read < RecordSize || BinaryPrimitives.ReadUInt64LittleEndian(buffer) != Magic)
         {
-            return null;
+            // A missing file legitimately means "never run before". A file that exists but is short or has
+            // the wrong magic is corruption -- treating it the same way would let a flipped bit erase the
+            // replicated-cluster history that makes single-node-to-replicated the only safe direction.
+            throw new InvalidOperationException(
+                $"The cluster mode marker at '{_path}' is unreadable. Refusing to start rather than "
+                + "silently treating this node as never having run, which could allow a replicated node to "
+                + "restart as single-node.");
         }
 
         return new ClusterModeMarker(

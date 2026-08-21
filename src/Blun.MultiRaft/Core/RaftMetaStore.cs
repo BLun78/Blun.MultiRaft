@@ -91,7 +91,12 @@ public sealed class FileRaftMetaStore : IRaftMetaStore
         int read = await RandomAccess.ReadAsync(handle, buffer, 0, cancellationToken).ConfigureAwait(false);
         if (read < RecordSize || BinaryPrimitives.ReadUInt64LittleEndian(buffer) != Magic)
         {
-            return RaftMeta.Initial;
+            // A missing file is legitimate -- a node that has never voted. A file that exists but is short
+            // or has the wrong magic is corruption, and must not be treated the same way: silently resetting
+            // to term 0 / no vote is exactly how a node ends up voting twice in a term it already voted in.
+            throw new InvalidOperationException(
+                $"The Raft metadata for group {group.Value} is unreadable. Refusing to start rather than "
+                + "silently resetting term and vote, which would allow a second vote in a term already voted in.");
         }
 
         long term = BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(8));
