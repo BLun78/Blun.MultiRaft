@@ -26,6 +26,10 @@ dotnet test test/Blun.MultiRaft.Tests/Blun.MultiRaft.Tests.csproj --filter-class
 # MTP/xUnit v3 project. It runs the built DLL directly:
 dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/results.trx
 
+# The DLL rejects the --filter-* flags above ("unknown option"); it takes xUnit v3 query syntax:
+dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -filter "/*/*/ClassName/*"
+dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -filter "/*/*/*/MethodName"
+
 # Benchmarks -- must always run both net10.0 and net11.0 in one invocation, to compare runtime-to-runtime
 dotnet run --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -c Release -f net11.0 -- --runtimes net10.0 net11.0
 dotnet run -c Release --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -- --filter "*WalAppend*"
@@ -43,6 +47,10 @@ npm --prefix demo/Blun.MultiRaft.Observer.Ui start
 Never pass an unset or possibly-empty variable as a path to a command that writes or deletes. `git worktree
 add "$VAR" HEAD` with an empty `VAR` resolves to the repository root and begins deleting the working tree —
 this has already destroyed this repository's history once. Use literal paths, or verify with `test -n`.
+
+A worktree that has run benchmarks will not delete: `BenchmarkDotNet.Artifacts` nests paths past Windows'
+limit, so `git worktree remove` fails with "Filename too long" even with `--force`. It still deregisters the
+worktree; finish with `git config core.longpaths true` and a PowerShell `Remove-Item -Recurse -Force`.
 
 ## Platform support
 
@@ -87,6 +95,12 @@ CI (`.github/workflows/ci.yml`) runs the full matrix on push/PR to `main`.
   `ByteString.CopyFrom`). Ignoring this does not fail loudly: headers are copied by value, so indices and
   terms stay right, the follower's consistency check passes, and only the *contents* are wrong. It cost days
   once; see `doc/open-issue-seed-visibility.md`.
+- **A new `RaftEntryHeader` field has to be added to `Protos/raft.proto` and `RaftFrameCodec` as well.**
+  The codec builds header fields one at a time, so a field missing there does not exist for the receiver —
+  and it fails in the same silent shape as the rule above, with term, index and checksum all agreeing.
+  No in-process test can catch it: `InMemoryRaftTransport` copies headers by value and carries the field
+  whatever the proto says. `ToDomain` should refuse values it does not understand rather than narrow them
+  (see the `Kind` and `Compression` checks) — a truncated enum turns into a different, valid-looking one.
 
 ## Architecture
 
@@ -123,6 +137,18 @@ Inside `src/Blun.MultiRaft`:
   it's being written, which fights the whole per-group-footprint design at scale. Turn on only for hot queues.
 - **Message size capped at 1024 KB**; the framing buffer is deliberately *not* sized to the cap (covers
   ordinary commands, borrows from the array pool above that) to avoid charging every group a megabyte.
+- **Payload compression is opt-in per group and decided per entry** (`RaftGroupOptions.PayloadCompression`,
+  default `None`). One level rather than a choice of levels: every LZ4 level above the fastest cost more on
+  the append-and-flush path than it saved, at every size measured — eight times the uncompressed time at a
+  megabyte. And the per-entry choice is made by *trying* rather than by a size threshold, because
+  compressibility decides, not size: the same level and size differed sixfold between repetitive and random
+  content, so a threshold would guess wrong precisely on already-compressed payloads.
+  `RaftEntryHeader.Compression` carries the outcome, so a group with compression on still writes `None` for
+  anything that did not shrink. Raw LZ4 block codec with a four-byte length prefix, *not* the frame format —
+  `LZ4EncoderSettings.ContentLength` throws `NotImplementedException` for span targets in K4os, which is the
+  only part of the frame worth having here. Membership entries are never compressed: the configuration
+  replay at startup reads them straight off the log, with no state machine in the path to expand them.
+  See `doc/raft-payload-compression.md` and the measurements in `doc/compression-level-benchmark.md`.
 - **Two WAL implementations from the start** (`InMemoryRaftWal`, `SegmentedRaftWal`) sharing one contract
   test suite (`WalTests.cs`) — this has already caught real divergence between them.
 - **One `System.Threading.Timer` for the whole host, not one per group** — a per-group timer is a queue
