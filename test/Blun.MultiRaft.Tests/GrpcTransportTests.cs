@@ -168,6 +168,49 @@ public sealed class GrpcTransportTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CompressionFlagSurvivesTheWireRoundTrip()
+    {
+        // Same shape of claim as the application tag above, but this one corrupts data rather than an index:
+        // a follower stores what it is sent verbatim and only expands at apply time, so an entry that arrives
+        // marked uncompressed hands a compressed block to the state machine as though it were the command.
+        // Term, index and checksum would all still agree -- silent, exactly like the recycled-buffer bug in
+        // RaftFrameCodec's remarks, and equally invisible to InMemoryRaftTransport, which copies headers by
+        // value and carries the flag no matter what the proto says.
+        var peers = new Dictionary<NodeId, Uri> { [new NodeId(1)] = new("http://localhost:" + _port) };
+        await using var transport = new GrpcRaftTransport(
+            new GrpcRaftTransportOptions { Peers = peers, LocalNode = new NodeId(0), Protocol = RaftGrpcProtocol.Http2 },
+            new InstantListener());
+
+        var request = new AppendEntriesRequest(new RaftGroupId(1), 1, new NodeId(0), 0, 0, 0);
+        byte[] payload = "compressed-block-stand-in"u8.ToArray();
+        var header = new RaftEntryHeader(
+            term: 1,
+            index: 1,
+            RaftEntryKind.Command,
+            payload.Length,
+            timestampTicks: 1234,
+            applicationTag: 0,
+            RaftPayloadCompression.Lz4Fast);
+
+        AppendEntriesResponse response = await transport.AppendEntriesAsync(
+            new NodeId(1),
+            request,
+            SingleEntry(new RaftLogEntry(in header, payload)),
+            CancellationToken.None);
+
+        Assert.True(response.Success);
+        Assert.Contains(
+            Listener.ReceivedHeaders,
+            h => h.Index == 1 && h.Compression == RaftPayloadCompression.Lz4Fast);
+
+        static async IAsyncEnumerable<RaftLogEntry> SingleEntry(RaftLogEntry entry)
+        {
+            await Task.CompletedTask;
+            yield return entry;
+        }
+    }
+
+    [Fact]
     public async Task EntriesReadFromTheLogArriveWithTheirOwnPayloads()
     {
         // The log hands out payloads that alias a buffer it recycles on every MoveNextAsync -- that is its

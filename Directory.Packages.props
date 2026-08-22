@@ -34,9 +34,13 @@
          election and coordination timers deterministically instead of waiting on the wall clock for them. -->
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.9.0" />
   </ItemGroup>
-  <ItemGroup Label="Benchmark">
-    <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.1" />
+  <ItemGroup Label="Compression">
+    <!-- Core uses the base package's raw block codec (see RaftPayloadCodec for why, not the frame format);
+         the benchmark project additionally needs .Streams, since it measures the frame APIs too. -->
     <PackageVersion Include="K4os.Compression.LZ4" Version="1.3.8" />
     <PackageVersion Include="K4os.Compression.LZ4.Streams" Version="1.3.8" />
+  </ItemGroup>
+  <ItemGroup Label="Benchmark">
+    <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.1" />
   </ItemGroup>
 </Project>

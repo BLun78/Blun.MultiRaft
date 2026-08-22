@@ -59,6 +59,13 @@ message LogEntry {
   // entry instead of the whole record -- see IRaftWal.ReadHeadersFromAsync. Must round-trip over the wire or
   // a follower's own rebuild would silently disagree with the leader's.
   uint32 application_tag = 6;
+
+  // How `payload` is encoded (RaftPayloadCompression). Must round-trip: the follower stores these bytes
+  // verbatim and only expands them when it applies the entry, so an omitted flag would have it hand a
+  // compressed block to its state machine as if it were the command. The failure is silent in exactly the
+  // way RaftFrameCodec's own remarks describe -- term, index and checksum all agree, only the contents are
+  // wrong -- and invisible to any test on InMemoryRaftTransport, which copies the header by value.
+  uint32 compression = 7;
 }
 
 message AppendEntries {

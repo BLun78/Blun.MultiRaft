@@ -91,6 +91,27 @@ public sealed class RaftGroupOptions
     public DurabilityLevel Durability { get; init; } = DurabilityLevel.Quorum;
 
     /// <summary>
+    /// Whether appends try to LZ4-compress the payload before it reaches the log. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// An on/off switch rather than a choice of level, and the entry-by-entry decision is made by trying
+    /// rather than by predicting. Both fall out of measurement (<c>doc/compression-level-benchmark.md</c>):
+    /// every level above the fastest cost more on the append-and-flush path than it saved, at every payload
+    /// size measured — up to eight times the uncompressed time at a megabyte — so there is nothing to choose
+    /// between. And whether compression helps at all turns on how compressible the payload is, not how large
+    /// it is: the same level and size differed by a factor of six between repetitive and random content, so a
+    /// size threshold would guess wrong precisely on the payloads that are already compressed or encrypted.
+    /// Trying costs little enough (~13% on the worst measured case, an incompressible megabyte) to be worth
+    /// paying for a correct answer per entry.
+    /// <para>
+    /// The result of that per-entry decision travels in <see cref="RaftEntryHeader.Compression"/>, so a group
+    /// switched on still writes <see cref="RaftPayloadCompression.None"/> for anything that did not shrink,
+    /// and a reader never has to know what the group was configured with.
+    /// </para>
+    /// </remarks>
+    public RaftPayloadCompression PayloadCompression { get; init; } = RaftPayloadCompression.None;
+
+    /// <summary>
     /// Whether a candidate runs a pre-vote round before incrementing its term (Raft §9.6). On by default:
     /// the cost is one extra round trip on a real election, and it prevents a rejoining node from disrupting
     /// a healthy group.

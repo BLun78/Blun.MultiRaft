@@ -71,6 +71,7 @@ internal static class RaftFrameCodec
             TimestampTicks = entry.Header.TimestampTicks,
             Kind = (uint)entry.Header.Kind,
             ApplicationTag = entry.Header.ApplicationTag,
+            Compression = (uint)entry.Header.Compression,
             Payload = ByteString.CopyFrom(entry.Payload.Span),
         };
 
@@ -91,6 +92,13 @@ internal static class RaftFrameCodec
             throw new InvalidOperationException($"Application tag {entry.ApplicationTag} does not fit a byte.");
         }
 
+        // Same narrowing hazard as Kind, and the same answer: a compression scheme this node cannot decode
+        // must be refused rather than truncated into one it can, which would hand the state machine garbage.
+        if (entry.Compression > (uint)RaftPayloadCompression.Lz4Fast)
+        {
+            throw new InvalidOperationException($"Unknown payload compression {entry.Compression}.");
+        }
+
         byte[] payload = entry.Payload.ToByteArray();
         return new RaftLogEntry(
             new RaftEntryHeader(
@@ -99,7 +107,8 @@ internal static class RaftFrameCodec
                 (RaftEntryKind)entry.Kind,
                 payload.Length,
                 entry.TimestampTicks,
-                (byte)entry.ApplicationTag),
+                (byte)entry.ApplicationTag,
+                (RaftPayloadCompression)entry.Compression),
             payload);
     }
 
