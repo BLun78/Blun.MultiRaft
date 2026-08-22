@@ -26,6 +26,10 @@ dotnet test test/Blun.MultiRaft.Tests/Blun.MultiRaft.Tests.csproj --filter-class
 # MTP/xUnit v3 project. It runs the built DLL directly:
 dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/results.trx
 
+# The DLL rejects the --filter-* flags above ("unknown option"); it takes xUnit v3 query syntax:
+dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -filter "/*/*/ClassName/*"
+dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -filter "/*/*/*/MethodName"
+
 # Benchmarks -- must always run both net10.0 and net11.0 in one invocation, to compare runtime-to-runtime
 dotnet run --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -c Release -f net11.0 -- --runtimes net10.0 net11.0
 dotnet run -c Release --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -- --filter "*WalAppend*"
@@ -43,6 +47,10 @@ npm --prefix demo/Blun.MultiRaft.Observer.Ui start
 Never pass an unset or possibly-empty variable as a path to a command that writes or deletes. `git worktree
 add "$VAR" HEAD` with an empty `VAR` resolves to the repository root and begins deleting the working tree —
 this has already destroyed this repository's history once. Use literal paths, or verify with `test -n`.
+
+A worktree that has run benchmarks will not delete: `BenchmarkDotNet.Artifacts` nests paths past Windows'
+limit, so `git worktree remove` fails with "Filename too long" even with `--force`. It still deregisters the
+worktree; finish with `git config core.longpaths true` and a PowerShell `Remove-Item -Recurse -Force`.
 
 ## Platform support
 
