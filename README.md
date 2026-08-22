@@ -71,6 +71,11 @@ runs cleanly on Linux and macOS specifically remains unverified until something 
   administration means to the host. It answers *is this node a legal target for that group's leadership* and
   *who is carrying least* — and moves a leader only when asked to. Nothing rebalances on a timer. See
   [doc/cluster-usage.md](doc/cluster-usage.md).
+- **Optional LZ4 payload compression.** Off by default. Switched on per group with
+  `RaftGroupOptions.PayloadCompression`, it compresses each command payload before the log sees it and
+  expands it again on the way to the state machine, so the log, the wire and the follower all carry the
+  smaller form. Each entry decides for itself: the compressed form is kept only when it is actually smaller,
+  and the header records which happened.
 
 ## Layout
 
@@ -189,6 +194,23 @@ plus envelope headroom, and a segment is validated at open to hold at least one 
 framing buffer is deliberately *not* sized to the cap — it covers ordinary commands and borrows from the
 array pool above that. Sizing it to the maximum would charge every group a megabyte for a message size
 almost none of them will see, which across thousands of queues is the footprint this design exists to avoid.
+
+**Compression has one level and no size threshold, and both of those are measured rather than chosen.** The
+obvious design — a level per group, and a payload-size rule deciding when to bother — is the one the numbers
+ruled out. Every LZ4 level above the fastest cost more on the append-and-flush path than it saved, at every
+size measured, reaching eight times the uncompressed time at a megabyte: there is nothing to choose between,
+so `RaftPayloadCompression` is `None` or `Lz4Fast` and that is all. And a size threshold would be guessing at
+the wrong variable, because what decides whether compression pays is how compressible the payload is, not how
+large: the same level at the same size differed sixfold between repetitive and random content. So the choice
+is made per entry, by trying — cheap enough at the fastest level to be worth a correct answer — and the
+compressed form is kept only when it is genuinely smaller. `RaftEntryHeader.Compression` carries the outcome,
+which means a group with compression switched on still writes `None` for anything incompressible, and a
+reader never needs to know how the group was configured. The encoding is the raw LZ4 block codec behind a
+four-byte length prefix rather than the LZ4 frame format: the frame's self-description is redundant next to
+that header field and the WAL's own checksum, and its one genuinely useful part — the content length that
+would size a decode buffer — is not implemented by K4os for span targets at all. Numbers in
+[Measurements](#measurements); the full reasoning in
+[doc/raft-payload-compression.md](doc/raft-payload-compression.md).
 
 **Two WAL implementations from the start.** `InMemoryRaftWal` is not only for tests. An interface with one
 implementation is a wrapper class; the shared contract suite in `WalTests.cs` runs against both, and it has
@@ -324,6 +346,45 @@ batching path to keep paying for itself there.
 132 B and 112 B — it does not track payload size, which is the zero-copy write path showing up in the
 numbers. The unmapped 4 KB figure of 680 B is the one place a payload-sized buffer is briefly involved.
 `InMemoryRaftWal`, by contrast, copies deliberately, having no buffer of its own.
+
+### Compression
+
+A separate sweep, and read separately from the table above: **fsync is on here**, deliberately, because the
+question was what a caller actually waits for rather than what the code costs. Three caveats. It ran on
+net11.0 only — a one-off exploratory pass, not a runtime comparison, so it does not follow the
+both-runtimes rule the rest of the benchmarks do. The figures were taken through K4os's frame API, while the
+implementation settled on the raw block codec, which does strictly less work per call — so treat these as an
+upper bound on what the shipped path costs. And each cell is one `Mean` at `--job` defaults, not a repeated
+measurement; the millisecond-scale differences are solid, the tens-of-microseconds ones are not.
+
+Milliseconds per compress-append-flush, as *repetitive content / random content* — the two ends of
+compressibility:
+
+| Payload | `None` | `Lz4Fast` (`L00_FAST`) | `L06_HC` | `L12_MAX` |
+|---|---|---|---|---|
+| 2 KB | 0.43 / 0.43 | 0.42 / 0.43 | 0.43 / 0.43 | 0.47 / 0.44 |
+| 64 KB | 2.03 / 2.09 | **1.99** / 2.09 | 2.03 / 2.82 | 2.03 / 2.90 |
+| 256 KB | 3.27 / 3.32 | **2.04** / 3.35 | 2.39 / 7.33 | 8.68 / 7.66 |
+| 1 MiB | 4.13 / 4.18 | **2.25** / 4.66 | 3.76 / 22.53 | 35.56 / 23.34 |
+
+**No level above the fastest ever beats it.** Not in one cell of this table — neither size nor content type
+produces a case where paying for a higher level comes out ahead of `Lz4Fast`. `L06_HC` on
+random content at a megabyte costs 22.5 ms against 4.2 ms for storing it uncompressed, and `L12_MAX` on
+*repetitive* content — the case it should be best at — is the worst cell in the table at 35.6 ms, apparently
+because its exhaustive parse has the most candidates to weigh exactly where matches are plentiful. Whatever
+compression buys in a shorter flush, these levels spend several times over on CPU first. That is what reduced
+the enum to on and off.
+
+**`Lz4Fast` is a no-op below about 256 KB.** At 2 KB and 64 KB it lands within a few percent of `None` in
+either direction — fsync dominating a compression cost still measured in microseconds. It neither helps nor
+hurts an ordinary 1 KB queue command. The case it exists for is the payload approaching the 1024 KB cap,
+where compressible content nearly halves the wait.
+
+**Compressibility, not size, decides.** At a megabyte `Lz4Fast` takes 2.25 ms on repetitive content and
+4.66 ms on random — against an uncompressed baseline of about 4.15 ms either way. Same level, same size: a
+win of nearly 2x on one, a loss of about 11% on the other. A size threshold would have switched compression
+on for both. Trying per entry and keeping the result only when it shrank pays that 11% in the worst case and
+is right in every case.
 
 **Automatic compaction is opt-in, triggered by applied growth, never by a timer.** Setting
 `RaftGroupOptions.AutoCompactionThreshold` makes a group call its own `TakeSnapshotAsync` once entries
