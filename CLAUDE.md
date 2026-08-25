@@ -30,6 +30,12 @@ dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.d
 dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -filter "/*/*/ClassName/*"
 dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net10.0/Blun.MultiRaft.Tests.dll -filter "/*/*/*/MethodName"
 
+# NativeAOT probe -- publishes and RUNS the WAL AOT-compiled. CI does this on all three OSes, both TFMs.
+# The publish fails on any ILC trim/AOT warning; the binary then asserts on what it reads back, so a wrong
+# answer is a non-zero exit. Needs the platform's native toolchain (VS C++ / clang+zlib1g-dev / Xcode CLT).
+dotnet publish test/Blun.MultiRaft.AotProbe/Blun.MultiRaft.AotProbe.csproj -c Release -f net10.0 -o artifacts/aot/net10.0
+./artifacts/aot/net10.0/Blun.MultiRaft.AotProbe   # .exe on Windows
+
 # Benchmarks -- must always run both net10.0 and net11.0 in one invocation, to compare runtime-to-runtime
 dotnet run --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -c Release -f net11.0 -- --runtimes net10.0 net11.0
 dotnet run -c Release --project benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj -- --filter "*WalAppend*"
@@ -85,7 +91,24 @@ CI (`.github/workflows/ci.yml`) runs the full matrix on push/PR to `main`.
   EventId ranges: 1000–1016 Core Raft (`RaftGroupInstance.Log`), 1100+ Host (`HostLog`), 1200+ Cluster
   coordinator (`ClusterLog`), 1300+ gRPC transport (`GrpcLog`), 2000+ Demo node (`NodeStartedLog`), 2100+
   Observer (`ObserverLog`), 2200+ App-host control plane (`ControlPlaneLog`).
-- Code must be trim-safe and AOT-compatible.
+- Code must be trim-safe and AOT-compatible. `IsAotCompatible=true` on the three `src/` libraries only turns
+  on Roslyn analyzers, which read that assembly's own IL — they cannot see a dependency that starts
+  reflecting in a later version, and they never prove the binary runs. `test/Blun.MultiRaft.AotProbe` is what
+  actually proves it, and CI runs it on every OS. It covers the WAL only, deliberately: pulling
+  `Blun.MultiRaft.Grpc` in would drag `Grpc.AspNetCore`'s separate and much larger AOT question along, and
+  the probe would then fail for reasons that say nothing about the storage layer.
+- **`Blun.MultiRaft.Wal` runs `AnalysisModePerformance=All` and `AnalysisModeReliability=All`**, which with
+  `TreatWarningsAsErrors` makes CA2007, CA1822 and the rest build errors in that project. Set there rather
+  than repo-wide because solution-wide those two modes produce ~920 warnings, nearly all CA2007 in the demo
+  and test projects, where `ConfigureAwait` is noise. Note that the `AnalysisLevel=latest` in
+  `Directory.Build.props` does *not* enable these rules — it picks the rule version, not the rule set.
+  The one standing suppression is CA1849 on `RaftSnapshot`'s `stream.Flush(flushToDisk: true)`: there is no
+  async fsync, and `FlushAsync` would flush .NET's buffers to the OS rather than the OS's to the platter,
+  which would leave `File.Move` committing a snapshot that is not durable.
+- **`RaftLogEntry` equality compares payload *contents*, not the memory reference.** It has to: the log hands
+  out slices of a buffer it recycles, so a reference comparison would call two different entries equal when
+  they reused one buffer, and one entry unequal to itself when it was read twice. `GetHashCode` hashes the
+  header alone — consistent, and O(1) for a payload that may be a megabyte.
 - Throw `InvalidOperationException` for integrity violations; `IOException` for transport failures. This
   distinction is load-bearing: the replication loop treats `IOException` as an ordinary retryable condition,
   so throwing it for a real integrity problem makes a group spin silently forever.

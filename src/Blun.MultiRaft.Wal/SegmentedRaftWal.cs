@@ -269,7 +269,7 @@ public sealed class SegmentedRaftWal : IRaftWal
     /// indexing through <see cref="ReadOnlyMemory{T}.Span"/> instead would re-run the getter — a type check
     /// and a span construction, not a field read — once per entry.
     /// </remarks>
-    private int CountThatFit(ReadOnlySpan<RaftLogEntry> entries, long room, int checksumSize, out int bytes)
+    private static int CountThatFit(ReadOnlySpan<RaftLogEntry> entries, long room, int checksumSize, out int bytes)
     {
         // Coalesce as much of the batch as fits the current segment into one buffer: a replication
         // message should cost one write, not one per entry. The split point is the segment boundary.
