@@ -4,8 +4,6 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
-using System.Runtime.CompilerServices;
-
 namespace Blun.MultiRaft.Wal.Checksum;
 
 /// <summary>Factory that maps <see cref="WalChecksumAlgorithm"/> to the matching <see cref="IWalChecksumStrategy"/>.</summary>
@@ -23,7 +21,6 @@ internal static class WalChecksumStrategy
     };
 
     /// <summary>Returns the byte width for the given <paramref name="algorithm"/>.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ChecksumSizeFor(WalChecksumAlgorithm algorithm) => algorithm switch
     {
         WalChecksumAlgorithm.Crc32 => 4,
