@@ -7,6 +7,7 @@
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Node;

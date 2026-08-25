@@ -66,6 +66,7 @@ public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
             }
         }
 
+#pragma warning disable CA2007 // `await using` has no ConfigureAwait overload; DisposeAsync here never needs the captured context.
         await using var session = new RaftStreamSession(
             responseStream,
             requestStream,
@@ -73,6 +74,7 @@ public sealed class RaftProtocolService : RaftProtocol.RaftProtocolBase
             context.CancellationToken,
             _logger,
             peerId);
+#pragma warning restore CA2007
 
         // The call has to stay open as long as the peer keeps the stream: returning would close it and force
         // a reconnect on every group sharing it.

@@ -231,7 +231,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         ClusterLog.Started(
             _logger,
             _options.Self.Value,
-            _options.Mode.ToString(),
+            _options.Mode,
             seed,
             _options.EffectiveNodes.Length);
 
@@ -520,7 +520,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
                 return first;
             }
 
-            ClusterLog.TargetRejected(_logger, group.Value, named.Value, first.Status.ToString());
+            ClusterLog.TargetRejected(_logger, group.Value, named.Value, first.Status);
         }
 
         LeaderTargetResponse last = new(Self, LeaderTargetStatus.NoLeader, 0, Transferred: false);
@@ -1022,7 +1022,7 @@ internal static partial class ClusterLog
         EventId = 1200,
         Level = LogLevel.Information,
         Message = "Cluster coordinator started on node {Node} in {Mode} mode (seed: {Seed}, {NodeCount} nodes configured).")]
-    public static partial void Started(ILogger logger, ulong node, string mode, bool seed, int nodeCount);
+    public static partial void Started(ILogger logger, ulong node, ClusterMode mode, bool seed, int nodeCount);
 
     [LoggerMessage(
         EventId = 1201,
@@ -1058,7 +1058,7 @@ internal static partial class ClusterLog
         EventId = 1206,
         Level = LogLevel.Debug,
         Message = "Group {Group}: node {Node} was refused as a leadership target ({Status}); trying alternatives.")]
-    public static partial void TargetRejected(ILogger logger, ulong group, ulong node, string status);
+    public static partial void TargetRejected(ILogger logger, ulong group, ulong node, LeaderTargetStatus status);
 
     [LoggerMessage(
         EventId = 1207,
