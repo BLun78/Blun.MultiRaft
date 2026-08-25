@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Blun.MultiRaft.AotProbe</RootNamespace>
+
+    <!--
+      The point of this project. IsAotCompatible on the library only runs Roslyn analyzers, which see that
+      library's own IL and nothing else: they cannot see through a dependency that starts using reflection in
+      a later version, and they do not prove the produced binary runs. Only ILC, invoked by a real
+      PublishAot, does both. TrimmerSingleWarn=false and SuppressTrimAnalysisWarnings=false make ILC name
+      every offending call site instead of collapsing them into one summary warning per assembly.
+    -->
+    <PublishAot>true</PublishAot>
+    <TrimMode>full</TrimMode>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    Deliberately only the WAL. Blun.MultiRaft.Grpc pulls in Grpc.AspNetCore, which is a separate and much
+    larger AOT question; folding it in here would mean this probe fails for reasons that say nothing about
+    the storage layer. Widen the reference list when that question is actually being answered, not before.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../../src/Blun.MultiRaft.Wal/Blun.MultiRaft.Wal.csproj" />
+  </ItemGroup>
+
+</Project>

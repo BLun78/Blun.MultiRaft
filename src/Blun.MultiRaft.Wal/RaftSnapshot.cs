@@ -141,11 +141,12 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
         // stay open for as long as SendAsync streams the snapshot to a peer, and on Windows -- where
         // FileShare is enforced rather than advisory -- a WriteAsync landing in the meantime would fail to
         // File.Move over a path this store still has open for reading.
-        await using FileStream stream = new(
+        FileStream stream = new(
             path,
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete);
+        await using var streamScope = stream.ConfigureAwait(false);
         byte[] header = new byte[RaftSnapshotMetadata.HeaderSize];
         if (await stream.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken)
                 .ConfigureAwait(false) < header.Length
@@ -202,11 +203,12 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
             yield break;
         }
 
-        await using FileStream stream = new(
+        FileStream stream = new(
             path,
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete);
+        await using var streamScope = stream.ConfigureAwait(false);
         stream.Seek(RaftSnapshotMetadata.HeaderSize + metadata.Value.Configuration.Length, SeekOrigin.Begin);
 
         byte[] chunk = new byte[ChunkBytes];
@@ -240,7 +242,8 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
 
         try
         {
-            await using (FileStream stream = File.Create(staging))
+            FileStream stream = File.Create(staging);
+            await using (stream.ConfigureAwait(false))
             {
                 byte[] header = new byte[RaftSnapshotMetadata.HeaderSize];
                 BinaryPrimitives.WriteUInt64LittleEndian(header, RaftSnapshotMetadata.Magic);
@@ -256,7 +259,14 @@ public sealed class FileRaftSnapshotStore : IRaftSnapshotStore
                     await stream.WriteAsync(chunk, cancellationToken).ConfigureAwait(false);
                 }
 
+                // Suppressed, not "fixed": this is the snapshot's durability boundary, and there is no async
+                // fsync in .NET. Stream.FlushAsync -- what CA1849 wants here -- pushes .NET's own buffers to
+                // the OS and returns; it does not ask the OS to put the bytes on the platter. Taking the
+                // analyzer's advice would leave File.Move committing a snapshot that is not durable, which is
+                // precisely the failure the staging-file dance below exists to prevent.
+#pragma warning disable CA1849 // Call async methods when in an async method
                 stream.Flush(flushToDisk: true);
+#pragma warning restore CA1849
             }
 
             // The move is the commit point. Writing in place would leave a snapshot that looks complete but

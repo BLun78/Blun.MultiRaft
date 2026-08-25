@@ -904,3 +904,65 @@ public sealed class ChecksumAlgorithmMismatchTests : IDisposable
         }
     }
 }
+
+/// <summary>
+/// <see cref="RaftLogEntry"/> compares payloads by content, and these tests exist because both wrong answers
+/// are reachable in normal operation rather than hypothetical: the log hands out slices of a buffer it
+/// recycles, so the default <see cref="ReadOnlyMemory{T}"/> comparison would call two different entries equal
+/// whenever they happened to land in the same reused buffer, and call one entry unequal to itself whenever it
+/// was read twice into different buffers.
+/// </summary>
+public sealed class RaftLogEntryEqualityTests
+{
+    private static RaftLogEntry Entry(long term, long index, byte[] payload)
+        => new(new RaftEntryHeader(term, index, RaftEntryKind.Command, payload.Length, 12345L), payload);
+
+    [Fact]
+    public void SameContentInDifferentBuffersIsEqual()
+    {
+        RaftLogEntry left = Entry(2, 7, [1, 2, 3]);
+        RaftLogEntry right = Entry(2, 7, [1, 2, 3]);
+
+        Assert.Equal(left, right);
+        Assert.True(left == right);
+        Assert.False(left != right);
+        Assert.Equal(left.GetHashCode(), right.GetHashCode());
+    }
+
+    [Fact]
+    public void SameHeaderButDifferentContentIsNotEqual()
+    {
+        // The recycled-buffer case: one buffer, rewritten between reads, carries two different entries.
+        RaftLogEntry first = Entry(2, 7, [1, 2, 3]);
+        RaftLogEntry second = Entry(2, 7, [9, 9, 9]);
+
+        Assert.NotEqual(first, second);
+        Assert.True(first != second);
+    }
+
+    [Fact]
+    public void DifferingHeaderIsNotEqual()
+    {
+        byte[] payload = [1, 2, 3];
+
+        Assert.NotEqual(Entry(2, 7, payload), Entry(3, 7, payload));
+        Assert.NotEqual(Entry(2, 7, payload), Entry(2, 8, payload));
+    }
+
+    [Fact]
+    public void EqualsObjectAgreesWithTypedEquals()
+    {
+        RaftLogEntry entry = Entry(2, 7, [1, 2, 3]);
+
+        Assert.True(entry.Equals((object)Entry(2, 7, [1, 2, 3])));
+        Assert.False(entry.Equals((object)Entry(2, 7, [4, 5, 6])));
+        Assert.False(entry.Equals(null));
+        Assert.False(entry.Equals("not an entry"));
+    }
+
+    [Fact]
+    public void EmptyPayloadsCompareEqual()
+    {
+        Assert.Equal(Entry(1, 1, []), Entry(1, 1, []));
+    }
+}

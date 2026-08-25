@@ -133,7 +133,7 @@ public readonly struct RaftEntryHeader : IEquatable<RaftEntryHeader>
 /// path, a pooled buffer on the WAL read path — which is what keeps the replication path copy-free. It is
 /// therefore only valid for as long as its owner says; anything that outlives the call must copy explicitly.
 /// </summary>
-public readonly struct RaftLogEntry
+public readonly struct RaftLogEntry : IEquatable<RaftLogEntry>
 {
     public readonly RaftEntryHeader Header;
     public readonly ReadOnlyMemory<byte> Payload;
@@ -160,4 +160,34 @@ public readonly struct RaftLogEntry
 
     /// <summary>Deep-copies the payload so the entry can outlive the buffer it was parsed from.</summary>
     public RaftLogEntry ToOwned() => new(in Header, Payload.ToArray());
+
+    /// <summary>
+    /// Compares the header and the payload's <em>contents</em>.
+    /// </summary>
+    /// <remarks>
+    /// Content comparison rather than the reference-and-range comparison <see cref="ReadOnlyMemory{T}"/> gives
+    /// by default, because <see cref="Payload"/> is a slice of a buffer this entry does not own and that the
+    /// log recycles: two unrelated entries read one after another point at the same recycled buffer and would
+    /// compare equal, while the same entry read twice lands in different buffers and would compare unequal.
+    /// Both answers would be wrong. Written out explicitly rather than left to the compiler because the
+    /// default <see cref="ValueType.Equals(object)"/> for a struct with a non-blittable field falls back to a
+    /// reflection-driven field walk that boxes -- slow, and metadata this library otherwise never needs
+    /// under NativeAOT.
+    /// </remarks>
+    public bool Equals(RaftLogEntry other)
+        => Header.Equals(other.Header) && Payload.Span.SequenceEqual(other.Payload.Span);
+
+    public override bool Equals(object? obj) => obj is RaftLogEntry other && Equals(other);
+
+    /// <summary>
+    /// Hashes the header alone, deliberately. Equal entries have equal headers, so this stays consistent with
+    /// <see cref="Equals(RaftLogEntry)"/> -- and the header already carries term, index and payload length,
+    /// which is what actually distinguishes entries. Hashing the payload too would make the hash cost scale
+    /// with a message that may be a megabyte.
+    /// </summary>
+    public override int GetHashCode() => Header.GetHashCode();
+
+    public static bool operator ==(RaftLogEntry left, RaftLogEntry right) => left.Equals(right);
+
+    public static bool operator !=(RaftLogEntry left, RaftLogEntry right) => !left.Equals(right);
 }
