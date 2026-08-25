@@ -23,6 +23,12 @@ namespace Blun.MultiRaft.Wal;
 /// </remarks>
 internal sealed class WalSegment : IDisposable
 {
+    /// <summary>
+    /// How much of a segment the recovery scan holds at once. Deliberately unrelated to the segment size:
+    /// it bounds the pooled buffer a restart borrows per group, not how much of the log can be recovered.
+    /// </summary>
+    private const int ScanWindowBytes = 64 * 1024;
+
     private readonly List<long> _offsets;
     private readonly List<long> _terms;
     private readonly List<int> _sizes;
@@ -97,26 +103,57 @@ internal sealed class WalSegment : IDisposable
         long good = 0;
         bool torn = false;
 
-        using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        // SequentialScan for the readahead: this is the one place in the log that reads a whole segment
+        // front to back.
+        //
+        // Asynchronous does NOT pay for itself here and is not kept because it is faster -- measured warm,
+        // it is a wash at one group (30.6 ms vs 30.1 ms for 200k entries) and slightly behind at two
+        // hundred opened at once (205 ms vs 188 ms). It is kept because without it RandomAccess.ReadAsync
+        // is not overlapped I/O at all: it is a blocking read parked on a thread-pool thread for as long as
+        // the read takes, which is nothing on a warm page cache and a real wait on a cold one. Recovery of
+        // every group happens at once, at startup, which is exactly when the cache is cold -- and that case
+        // is not measured here, so do not cite either direction as settled.
+        using SafeFileHandle handle = File.OpenHandle(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
         long fileLength = RandomAccess.GetLength(handle);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(ScanWindowBytes);
         try
         {
             long offset = 0;
             long expected = firstIndex;
+
+            // A window of the file at a time, with records parsed out of it, rather than a read per record:
+            // a segment of small entries is tens of thousands of records, and a syscall each to read a
+            // 32-byte header and then the ~100 bytes behind it is the whole cost of opening a group.
+            // The window always starts at a record boundary, so the file position of the record at `cursor`
+            // is exactly (window origin + cursor) -- which is what `offset` already tracks, so the origin
+            // itself never has to be stored.
+            int windowLength = 0;
+            int cursor = 0;
+
             while (offset + RaftEntryHeader.Size <= fileLength)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                int probe = await RandomAccess
-                    .ReadAsync(handle, buffer.AsMemory(0, RaftEntryHeader.Size), offset, cancellationToken)
-                    .ConfigureAwait(false);
-                if (probe < RaftEntryHeader.Size)
+
+                if (windowLength - cursor < RaftEntryHeader.Size)
                 {
-                    torn = true;
-                    break;
+                    windowLength = await FillAsync(handle, buffer, offset, fileLength, cancellationToken)
+                        .ConfigureAwait(false);
+                    cursor = 0;
+                    if (windowLength < RaftEntryHeader.Size)
+                    {
+                        // The loop condition established that the file holds these bytes, so failing to
+                        // read them is damage rather than the end of the log.
+                        torn = true;
+                        break;
+                    }
                 }
 
-                RaftEntryHeader header = RaftEntryHeader.Read(buffer);
+                RaftEntryHeader header = RaftEntryHeader.Read(buffer.AsSpan(cursor, RaftEntryHeader.Size));
 
                 // An all-zero header is the unwritten remainder of a preallocated (memory-mapped) segment,
                 // not damage. Reading it as a tear would make recovery delete every segment after this one.
@@ -143,19 +180,32 @@ internal sealed class WalSegment : IDisposable
                     break;
                 }
 
-                if (size > buffer.Length)
+                if (windowLength - cursor < size)
                 {
-                    // Rent before returning: if Rent throws (an oversized request from the wire), the old
-                    // buffer must not already be back in the pool, or two callers end up sharing it.
-                    byte[] larger = ArrayPool<byte>.Shared.Rent(size);
-                    ArrayPool<byte>.Shared.Return(buffer);
-                    buffer = larger;
+                    if (size > buffer.Length)
+                    {
+                        // Rent before returning: if Rent throws (an oversized request from the wire), the
+                        // old buffer must not already be back in the pool, or two callers end up sharing
+                        // it. The larger buffer is kept for the rest of the scan rather than shrunk back --
+                        // one record this big is a poor reason to re-read the window on the next one.
+                        byte[] larger = ArrayPool<byte>.Shared.Rent(size);
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        buffer = larger;
+                    }
+
+                    // The record straddles the end of the window (or outgrew it). Refill from its own start
+                    // so the whole of it is contiguous for the checksum.
+                    windowLength = await FillAsync(handle, buffer, offset, fileLength, cancellationToken)
+                        .ConfigureAwait(false);
+                    cursor = 0;
+                    if (windowLength < size)
+                    {
+                        torn = true;
+                        break;
+                    }
                 }
 
-                int read = await RandomAccess
-                    .ReadAsync(handle, buffer.AsMemory(0, size), offset, cancellationToken)
-                    .ConfigureAwait(false);
-                if (read < size || !RaftWalRecord.Verify(buffer.AsSpan(0, size), in header, checksum))
+                if (!RaftWalRecord.Verify(buffer.AsSpan(cursor, size), in header, checksum))
                 {
                     torn = true;
                     break;
@@ -165,6 +215,7 @@ internal sealed class WalSegment : IDisposable
                 terms.Add(header.Term);
                 sizes.Add(size);
                 offset += size;
+                cursor += size;
                 good = offset;
                 expected++;
             }
@@ -184,6 +235,37 @@ internal sealed class WalSegment : IDisposable
         }
 
         return new WalSegment(path, firstIndex, good, options, offsets, terms, sizes) { Torn = torn };
+    }
+
+    /// <summary>
+    /// Reads as much of the file from <paramref name="offset"/> as <paramref name="buffer"/> holds, and
+    /// returns how many bytes arrived. It loops because RandomAccess.ReadAsync is allowed to return a short
+    /// read in the middle of a file; taking the first one as the end of the data would report a tear in a
+    /// log that is perfectly intact.
+    /// </summary>
+    private static async ValueTask<int> FillAsync(
+        SafeFileHandle handle,
+        byte[] buffer,
+        long offset,
+        long fileLength,
+        CancellationToken cancellationToken)
+    {
+        int want = (int)Math.Min(buffer.Length, fileLength - offset);
+        int filled = 0;
+        while (filled < want)
+        {
+            int read = await RandomAccess
+                .ReadAsync(handle, buffer.AsMemory(filled, want - filled), offset + filled, cancellationToken)
+                .ConfigureAwait(false);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            filled += read;
+        }
+
+        return filled;
     }
 
     /// <summary>

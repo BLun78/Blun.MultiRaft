@@ -4,6 +4,7 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
+using System.Globalization;
 using System.Text;
 using Blun.MultiRaft.Wal;
 
@@ -585,6 +586,107 @@ public sealed class SegmentedWalRecoveryTests : IDisposable
 
         Assert.Equal(4, reopened.LastIndex);
     }
+
+    // Recovery scans a segment one 64 KB window at a time rather than issuing a read per record, so the
+    // three cases below are about the seams that windowing introduces and nothing else: a record split
+    // across a window boundary, a record too large for a window at all, and a torn one of those.
+    private static SegmentedRaftWalOptions WideSegmentOptions => new()
+    {
+        SegmentSizeBytes = 1024 * 1024,
+        MaxPayloadBytes = 4096,
+    };
+
+    private static SegmentedRaftWalOptions LargeRecordOptions => new()
+    {
+        SegmentSizeBytes = 4L * 1024 * 1024,
+        MaxPayloadBytes = 256 * 1024,
+    };
+
+    [Fact]
+    public async Task RecordsStraddlingAScanWindowBoundaryAreStillRecovered()
+    {
+        // 48 bytes of payload is a 88-byte record (32 header + 48 + 4 checksum, padded to 8), and 88 does
+        // not divide 65536 -- so records land across every window boundary rather than beside it. A scan
+        // that read only up to the boundary and resumed after it would lose one record per window and
+        // then fail the density check on the next index.
+        const int perEntry = 48;
+        await using (SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory, WideSegmentOptions))
+        {
+            for (int i = 1; i <= 3000; i++)
+            {
+                await RaftWalContractTests.AppendAsync(wal, term: 1, index: i, Padded(i, perEntry));
+            }
+
+            await wal.FlushAsync();
+        }
+
+        await using SegmentedRaftWal reopened = await SegmentedRaftWal.OpenAsync(_directory, WideSegmentOptions);
+        Assert.Equal(3000, reopened.LastIndex);
+
+        int seen = 0;
+        await foreach (RaftLogEntry entry in reopened.ReadFromAsync(1, 3000))
+        {
+            seen++;
+            Assert.Equal(seen, entry.Index);
+            Assert.Equal(Padded(seen, perEntry), Encoding.UTF8.GetString(entry.Payload.Span));
+        }
+
+        Assert.Equal(3000, seen);
+    }
+
+    [Fact]
+    public async Task ARecordLargerThanTheScanWindowIsRecoveredAndSoIsWhatFollowsIt()
+    {
+        string large = new('p', 100_000);
+        await using (SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory, LargeRecordOptions))
+        {
+            await RaftWalContractTests.AppendAsync(wal, term: 1, index: 1, "before");
+            await RaftWalContractTests.AppendAsync(wal, term: 1, index: 2, large);
+            await RaftWalContractTests.AppendAsync(wal, term: 1, index: 3, "after");
+            await wal.FlushAsync();
+        }
+
+        await using SegmentedRaftWal reopened = await SegmentedRaftWal.OpenAsync(_directory, LargeRecordOptions);
+        Assert.Equal(3, reopened.LastIndex);
+
+        var payloads = new List<string>();
+        await foreach (RaftLogEntry entry in reopened.ReadFromAsync(1, 3))
+        {
+            payloads.Add(Encoding.UTF8.GetString(entry.Payload.Span));
+        }
+
+        // The third entry is the one that matters: it proves the scan resumed correctly from a window that
+        // had to be grown and refilled around the oversized record, not just that the record itself read.
+        Assert.Equal(["before", large, "after"], payloads);
+    }
+
+    [Fact]
+    public async Task ATornRecordLargerThanTheScanWindowIsStillDiscarded()
+    {
+        await using (SegmentedRaftWal wal = await SegmentedRaftWal.OpenAsync(_directory, LargeRecordOptions))
+        {
+            await RaftWalContractTests.AppendAsync(wal, term: 1, index: 1, "before");
+            await RaftWalContractTests.AppendAsync(wal, term: 1, index: 2, new string('p', 100_000));
+            await wal.FlushAsync();
+        }
+
+        string segment = Directory.GetFiles(_directory, "*.seg").Order(StringComparer.Ordinal).Last();
+        long length = new FileInfo(segment).Length;
+        using (FileStream stream = File.Open(segment, FileMode.Open, FileAccess.Write))
+        {
+            stream.SetLength(length - 4096);
+        }
+
+        await using SegmentedRaftWal reopened = await SegmentedRaftWal.OpenAsync(_directory, LargeRecordOptions);
+
+        // Growing the window for a record must not become a way of reading past the end of the file.
+        Assert.Equal(1, reopened.LastIndex);
+        await RaftWalContractTests.AppendAsync(reopened, term: 2, index: 2, "rewritten");
+        Assert.Equal(2, reopened.LastIndex);
+    }
+
+    private static string Padded(int value, int width)
+        => value.ToString(CultureInfo.InvariantCulture).PadLeft(width, '0');
 
     public void Dispose()
     {
