@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Buffers.Binary;
+using Blun.MultiRaft.Core;
 using Microsoft.Win32.SafeHandles;
 
 namespace Blun.MultiRaft.Cluster;

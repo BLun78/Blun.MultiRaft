@@ -4,6 +4,8 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
+using Blun.MultiRaft.Core;
+
 namespace Blun.MultiRaft.Transport;
 
 /// <summary>

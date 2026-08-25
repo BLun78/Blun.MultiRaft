@@ -7,6 +7,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Threading.Channels;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
@@ -41,7 +42,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     private readonly ConcurrentDictionary<NodeId, LoadEntry> _load = new();
     private readonly Channel<ClusterEvent> _events;
 
-    private RaftGroupInstance? _group;
+    private Core.RaftGroupInstance? _group;
     private Task? _loop;
     private long _reportSequence;
     private bool _disposed;
@@ -114,7 +115,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     public NodeId Self => _options.Self;
 
     /// <summary>The cluster-management group, once started.</summary>
-    public RaftGroupInstance? Group => _group;
+    public Core.RaftGroupInstance? Group => _group;
 
     /// <summary>Whether this node leads the cluster group, and is therefore the cluster leader.</summary>
     public bool IsClusterLeader => _group?.IsLeader ?? false;
@@ -269,8 +270,8 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         byte applicationTag = 0,
         CancellationToken cancellationToken = default)
     {
-        RaftGroupInstance group = _group
-            ?? throw new InvalidOperationException("The cluster coordinator has not been started.");
+        Core.RaftGroupInstance group = _group
+                                       ?? throw new InvalidOperationException("The cluster coordinator has not been started.");
 
         return group.AppendAsync(payload, applicationTag, cancellationToken);
     }
@@ -289,7 +290,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     /// saves a handover the group would otherwise pay for within seconds of existing.
     /// </para>
     /// </remarks>
-    public async ValueTask<RaftGroupInstance> CreateGroupAsync(
+    public async ValueTask<Core.RaftGroupInstance> CreateGroupAsync(
         RaftGroupId group,
         RaftMembership membership,
         NodeId? initialLeader = null,
@@ -297,7 +298,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         RaftGroupOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        RaftGroupInstance instance = await _host
+        Core.RaftGroupInstance instance = await _host
             .AddGroupAsync(group, membership, stateMachine, options, cancellationToken)
             .ConfigureAwait(false);
 
@@ -563,7 +564,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     private List<NodeId> OrderCandidates(RaftGroupId group, NodeId? exclude)
     {
         List<NodeId> candidates = [];
-        if (!_host.TryGetGroup(group, out RaftGroupInstance? instance) || instance is null)
+        if (!_host.TryGetGroup(group, out Core.RaftGroupInstance? instance) || instance is null)
         {
             return candidates;
         }
@@ -615,7 +616,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         LeaderTargetRequest request,
         CancellationToken cancellationToken)
     {
-        if (!_host.TryGetGroup(request.Group, out RaftGroupInstance? instance) || instance is null)
+        if (!_host.TryGetGroup(request.Group, out Core.RaftGroupInstance? instance) || instance is null)
         {
             return new LeaderTargetResponse(Self, LeaderTargetStatus.Unreachable, 0, Transferred: false);
         }
@@ -827,7 +828,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     /// </remarks>
     private async ValueTask RebalanceAsync(CancellationToken cancellationToken)
     {
-        foreach (RaftGroupInstance instance in _host.Groups)
+        foreach (Core.RaftGroupInstance instance in _host.Groups)
         {
             RaftGroupId id = instance.Group;
             if (id == RaftGroupId.Cluster)
@@ -902,7 +903,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
     /// be a dead entry rather than a wrong one.
     /// </para>
     /// </remarks>
-    private async ValueTask WriteSelfMembershipAsync(RaftGroupInstance group, CancellationToken cancellationToken)
+    private async ValueTask WriteSelfMembershipAsync(Core.RaftGroupInstance group, CancellationToken cancellationToken)
     {
         if (!_selfMembershipPending || !group.IsLeader)
         {
@@ -914,7 +915,7 @@ public sealed class ClusterCoordinator : IRaftClusterListener, IAsyncDisposable
         ClusterLog.SeedRecorded(_logger, Self.Value);
     }
 
-    private void RaiseAvailability(RaftGroupInstance group)
+    private void RaiseAvailability(Core.RaftGroupInstance group)
     {
         TimeSpan window = _options.EffectiveGroupOptions.ElectionTimeout * 2;
         ImmutableHashSet<NodeId>.Builder builder = ImmutableHashSet.CreateBuilder<NodeId>();

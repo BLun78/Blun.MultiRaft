@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -22,7 +23,7 @@ public sealed class ReadIndexTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 0; i < 5; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("msg-" + i));
@@ -47,13 +48,13 @@ public sealed class ReadIndexTests
             [1UL, 2UL, 3UL],
             node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 0; i < 10; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("msg-" + i));
         }
 
-        RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         long readIndex = await follower.PrepareLinearizableReadAsync();
 
@@ -71,7 +72,7 @@ public sealed class ReadIndexTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         await leader.AppendAsync(Encoding.UTF8.GetBytes("before"));
 
         // This is the case that makes the leadership confirmation load-bearing rather than ceremonial. The
@@ -94,7 +95,7 @@ public sealed class ReadIndexTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         await leader.AppendAsync(Encoding.UTF8.GetBytes("only"));
 
         // A single voter is its own quorum, so there is nobody who could have superseded it and no round
@@ -109,8 +110,8 @@ public sealed class ReadIndexTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         cluster.Network.Cut(follower.Self, leader.Self);
 

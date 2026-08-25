@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
 
@@ -25,7 +26,7 @@ public sealed class LeaderTargetThresholdTests
     {
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Group, [1, 2, 3]);
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
 
         NodeId silent = FirstFollower(cluster, leader);
 
@@ -52,7 +53,7 @@ public sealed class LeaderTargetThresholdTests
     {
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Group, [1, 2, 3]);
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
 
         NodeId silent = FirstFollower(cluster, leader);
         cluster.Network.Cut(leader.Self, silent);
@@ -84,7 +85,7 @@ public sealed class LeaderTargetThresholdTests
         // which derives from MaxEntriesPerAppend (256). The backlog below sits deliberately between the two:
         // far past what would block a promotion, comfortably inside one replication round.
         await cluster.AddGroupEverywhereAsync(Group, [1, 2, 3]);
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
 
         NodeId behind = FirstFollower(cluster, leader);
         cluster.Network.Cut(leader.Self, behind);
@@ -126,7 +127,7 @@ public sealed class LeaderTargetThresholdTests
         };
 
         await cluster.AddGroupEverywhereAsync(Group, [1, 2, 3], options: options);
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Group);
 
         NodeId behind = FirstFollower(cluster, leader);
         cluster.Network.Cut(leader.Self, behind);
@@ -158,10 +159,10 @@ public sealed class LeaderTargetThresholdTests
         Assert.Equal(256, options.MaxEntriesPerAppend);
     }
 
-    private static NodeId FirstFollower(TestCluster cluster, RaftGroupInstance leader)
+    private static NodeId FirstFollower(TestCluster cluster, Core.RaftGroupInstance leader)
         => cluster.GroupsOf(Group).First(g => g.Self != leader.Self).Self;
 
-    private static async ValueTask AppendAsync(RaftGroupInstance leader, int count)
+    private static async ValueTask AppendAsync(Core.RaftGroupInstance leader, int count)
     {
         for (int i = 0; i < count; i++)
         {
@@ -176,7 +177,7 @@ public sealed class LeaderTargetThresholdTests
     /// so a fixed wait here would silently stop testing anything the day that timeout changes.
     /// </summary>
     private static async ValueTask<LeaderTargetResponse> WaitForStatusAsync(
-        RaftGroupInstance leader,
+        Core.RaftGroupInstance leader,
         NodeId candidate,
         LeaderTargetStatus expected,
         string what)

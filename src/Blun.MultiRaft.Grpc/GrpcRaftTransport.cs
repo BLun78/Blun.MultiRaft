@@ -8,6 +8,7 @@ using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc.Compression;
 using Blun.MultiRaft.Grpc.Protocol;
 using Blun.MultiRaft.Transport;

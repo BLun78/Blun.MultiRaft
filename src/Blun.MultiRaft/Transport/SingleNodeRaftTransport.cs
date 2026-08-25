@@ -4,6 +4,7 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Transport;
@@ -16,7 +17,7 @@ namespace Blun.MultiRaft.Transport;
 /// A single-voter group never touches a transport: the vote round returns before sending anything, pre-vote
 /// is skipped, the read-index barrier answers from itself, the commit index is its own match index, and the
 /// peer set is empty so there is nobody to replicate to. Consensus is complete without a wire. What this
-/// class exists for is the constructor signature — <see cref="RaftGroupInstance"/> requires a transport — and
+/// class exists for is the constructor signature — <see cref="Core.RaftGroupInstance"/> requires a transport — and
 /// to avoid standing up a server for a node that has nobody to talk to.
 /// <para>
 /// It throws <see cref="InvalidOperationException"/>, deliberately not <see cref="IOException"/>. An

@@ -6,7 +6,7 @@
 
 using System.Globalization;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>Identity of a physical node in the cluster. Value type: never boxed on the message path.</summary>
 public readonly record struct NodeId(ulong Value) : IComparable<NodeId>

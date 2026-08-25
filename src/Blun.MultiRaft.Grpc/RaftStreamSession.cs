@@ -6,6 +6,7 @@
 
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc.Protocol;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;

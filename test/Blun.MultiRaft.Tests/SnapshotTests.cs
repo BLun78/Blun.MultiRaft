@@ -7,6 +7,7 @@
 using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -96,8 +97,8 @@ public sealed class SnapshotTests
             [1UL, 2UL, 3UL],
             node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance straggler = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance straggler = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         // Cut the replica off, then move the leader well past it and compact everything it is missing.
         cluster.Network.Cut(leader.Self, straggler.Self);
@@ -144,7 +145,7 @@ public sealed class SnapshotTests
             await host.AddGroupAsync(Queue, initial, new RecordingStateMachine(), TestCluster.FastOptions);
         }
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         var joiner = new NodeId(4);
 
         // The joiner is added while cut off, so the membership entry that added it is one of the entries it
@@ -163,7 +164,7 @@ public sealed class SnapshotTests
         Assert.True(await leader.TakeSnapshotAsync());
 
         cluster.Network.Heal(leader.Self, joiner);
-        RaftGroupInstance learner = cluster.Group(4, Queue);
+        Core.RaftGroupInstance learner = cluster.Group(4, Queue);
 
         await TestCluster.WaitUntilAsync(
             () => learner.Membership.Contains(joiner),

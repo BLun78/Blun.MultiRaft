@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -70,7 +71,7 @@ public sealed class PayloadCompressionTests
             node => machines[node] = new RecordingStateMachine(),
             Compressed);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         byte[] payload = CompressiblePayload(length);
 
         long index = await leader.AppendAsync(payload);
@@ -100,7 +101,7 @@ public sealed class PayloadCompressionTests
             node => machines[node] = new RecordingStateMachine(),
             Compressed);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         byte[] payload = IncompressiblePayload(8_192);
 
         long index = await leader.AppendAsync(payload);
@@ -125,7 +126,7 @@ public sealed class PayloadCompressionTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL], stateMachine: null, Compressed);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         byte[] payload = CompressiblePayload(64_000);
 
         long index = await leader.AppendAsync(payload);
@@ -146,7 +147,7 @@ public sealed class PayloadCompressionTests
         // TestCluster.FastOptions, i.e. no PayloadCompression set at all.
         await cluster.AddGroupEverywhereAsync(Queue, [1UL], node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         byte[] payload = CompressiblePayload(64_000);
 
         long index = await leader.AppendAsync(payload);
@@ -173,7 +174,7 @@ public sealed class PayloadCompressionTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL], stateMachine: null, Compressed);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         await leader.AddLearnerAsync(new NodeId(2));
 
         IRaftWal wal = await LogOfAsync(cluster, leader);
@@ -192,7 +193,7 @@ public sealed class PayloadCompressionTests
 
     private static async ValueTask<RaftEntryHeader> HeaderAtAsync(
         TestCluster cluster,
-        RaftGroupInstance group,
+        Core.RaftGroupInstance group,
         long index)
     {
         IRaftWal wal = await LogOfAsync(cluster, group);
@@ -209,6 +210,6 @@ public sealed class PayloadCompressionTests
     /// The group's own log, not a copy: <see cref="InMemoryRaftWalFactory"/> hands out one instance per
     /// group. Never disposed here for that reason — the group is still using it.
     /// </summary>
-    private static ValueTask<IRaftWal> LogOfAsync(TestCluster cluster, RaftGroupInstance group)
+    private static ValueTask<IRaftWal> LogOfAsync(TestCluster cluster, Core.RaftGroupInstance group)
         => cluster.Logs[group.Self].OpenAsync(group.Group);
 }

@@ -10,7 +10,7 @@ using System.Globalization;
 using Blun.MultiRaft.Wal;
 using Microsoft.Win32.SafeHandles;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>The two values Raft requires to survive a restart: the current term and the vote cast in it.</summary>
 /// <param name="Term">Latest term this node has seen.</param>

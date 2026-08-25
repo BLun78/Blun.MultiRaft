@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -20,10 +21,10 @@ public sealed class LeadershipTransferTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         await leader.AppendAsync(Encoding.UTF8.GetBytes("before-transfer"));
 
-        RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         bool transferred = await leader.TransferLeadershipAsync(target.Self);
 
@@ -46,7 +47,7 @@ public sealed class LeadershipTransferTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 0; i < 5; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("msg-" + i));
@@ -67,8 +68,8 @@ public sealed class LeadershipTransferTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         // The catch-up wait inside TransferLeadershipAsync gives the assertion below a real window: the
         // target is already caught up (nothing was appended), so without the block this would very likely
@@ -102,8 +103,8 @@ public sealed class LeadershipTransferTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3, 4);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL, 4UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance[] others = [.. cluster.GroupsOf(Queue).Where(g => !g.IsLeader)];
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance[] others = [.. cluster.GroupsOf(Queue).Where(g => !g.IsLeader)];
 
         ValueTask<bool> first = leader.TransferLeadershipAsync(others[0].Self);
 
@@ -128,7 +129,7 @@ public sealed class LeadershipTransferTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
 
         Assert.True(await leader.TransferLeadershipAsync(leader.Self));
         Assert.True(leader.IsLeader);
@@ -144,7 +145,7 @@ public sealed class LeadershipTransferTests
             await host.AddGroupAsync(Queue, initial, null, TestCluster.FastOptions);
         }
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         var learner = new NodeId(4);
         await leader.AddLearnerAsync(learner);
 
@@ -161,7 +162,7 @@ public sealed class LeadershipTransferTests
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
         await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         await Assert.ThrowsAsync<NotLeaderException>(async () => await follower.TransferLeadershipAsync());
     }
@@ -172,8 +173,8 @@ public sealed class LeadershipTransferTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         cluster.Network.Cut(leader.Self, target.Self);
 

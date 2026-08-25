@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.IO.Compression;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc.Compression;
 using GzipCompressionProvider = Grpc.Net.Compression.GzipCompressionProvider;
 

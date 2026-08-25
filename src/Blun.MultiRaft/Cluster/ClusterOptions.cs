@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Collections.Immutable;
+using Blun.MultiRaft.Core;
 
 namespace Blun.MultiRaft.Cluster;
 

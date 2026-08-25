@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Collections.Concurrent;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
 using Microsoft.Extensions.Logging;
@@ -24,7 +25,7 @@ namespace Blun.MultiRaft.Hosting;
 /// </remarks>
 public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener, IAsyncDisposable
 {
-    private readonly ConcurrentDictionary<RaftGroupId, RaftGroupInstance> _groups = new();
+    private readonly ConcurrentDictionary<RaftGroupId, Core.RaftGroupInstance> _groups = new();
     private readonly IRaftWalFactory _walFactory;
     private readonly IRaftMetaStore _metaStore;
     private readonly IRaftSnapshotStore? _snapshots;
@@ -62,7 +63,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
     public NodeId Self { get; }
 
     /// <summary>Groups currently hosted here.</summary>
-    public IReadOnlyCollection<RaftGroupInstance> Groups => [.. _groups.Values];
+    public IReadOnlyCollection<Core.RaftGroupInstance> Groups => [.. _groups.Values];
 
     /// <summary>How many of the hosted groups this node currently leads. The number placement is chosen by.</summary>
     /// <remarks>
@@ -76,7 +77,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         get
         {
             int count = 0;
-            foreach (KeyValuePair<RaftGroupId, RaftGroupInstance> pair in _groups)
+            foreach (KeyValuePair<RaftGroupId, Core.RaftGroupInstance> pair in _groups)
             {
                 if (pair.Value.IsLeader)
                 {
@@ -113,7 +114,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
     /// <see cref="Cluster.ClusterCoordinator"/> for the cluster-management group; hosting a second group on
     /// its id would put two different sets of entries in one log.
     /// </exception>
-    public ValueTask<RaftGroupInstance> AddGroupAsync(
+    public ValueTask<Core.RaftGroupInstance> AddGroupAsync(
         RaftGroupId group,
         RaftMembership membership,
         IRaftStateMachine? stateMachine = null,
@@ -131,20 +132,20 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         return AddGroupCoreAsync(group, membership, stateMachine, options, cancellationToken);
     }
 
-    internal async ValueTask<RaftGroupInstance> AddGroupCoreAsync(
+    internal async ValueTask<Core.RaftGroupInstance> AddGroupCoreAsync(
         RaftGroupId group,
         RaftMembership membership,
         IRaftStateMachine? stateMachine = null,
         RaftGroupOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        if (_groups.TryGetValue(group, out RaftGroupInstance? existing))
+        if (_groups.TryGetValue(group, out Core.RaftGroupInstance? existing))
         {
             return existing;
         }
 
         IRaftWal wal = await _walFactory.OpenAsync(group, cancellationToken).ConfigureAwait(false);
-        var instance = new RaftGroupInstance(
+        var instance = new Core.RaftGroupInstance(
             group,
             Self,
             wal,
@@ -168,7 +169,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
     }
 
     /// <summary>Looks up a hosted group.</summary>
-    public bool TryGetGroup(RaftGroupId group, out RaftGroupInstance? instance)
+    public bool TryGetGroup(RaftGroupId group, out Core.RaftGroupInstance? instance)
         => _groups.TryGetValue(group, out instance);
 
     /// <summary>
@@ -180,7 +181,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         bool deleteData = false,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryRemove(group, out RaftGroupInstance? instance))
+        if (!_groups.TryRemove(group, out Core.RaftGroupInstance? instance))
         {
             return;
         }
@@ -203,7 +204,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         IAsyncEnumerable<RaftLogEntry> entries,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryGetValue(request.Group, out RaftGroupInstance? instance))
+        if (!_groups.TryGetValue(request.Group, out Core.RaftGroupInstance? instance))
         {
             // Term 0 tells the sender nothing it can act on, which is right: this node has no opinion about
             // a group it does not host, and must not be mistaken for a follower that fell behind.
@@ -219,7 +220,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         IAsyncEnumerable<ReadOnlyMemory<byte>> body,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryGetValue(request.Group, out RaftGroupInstance? instance))
+        if (!_groups.TryGetValue(request.Group, out Core.RaftGroupInstance? instance))
         {
             return new InstallSnapshotResponse(0, Success: false);
         }
@@ -232,7 +233,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         ReadIndexRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryGetValue(request.Group, out RaftGroupInstance? instance))
+        if (!_groups.TryGetValue(request.Group, out Core.RaftGroupInstance? instance))
         {
             return new ReadIndexResponse(0, Success: false, 0, 0);
         }
@@ -245,7 +246,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         TimeoutNowRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryGetValue(request.Group, out RaftGroupInstance? instance))
+        if (!_groups.TryGetValue(request.Group, out Core.RaftGroupInstance? instance))
         {
             return new TimeoutNowResponse(0, Accepted: false);
         }
@@ -258,7 +259,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         VoteRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryGetValue(request.Group, out RaftGroupInstance? instance))
+        if (!_groups.TryGetValue(request.Group, out Core.RaftGroupInstance? instance))
         {
             return new VoteResponse(0, Granted: false);
         }
@@ -275,7 +276,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         LeaderTargetRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (!_groups.TryGetValue(request.Group, out RaftGroupInstance? instance))
+        if (!_groups.TryGetValue(request.Group, out Core.RaftGroupInstance? instance))
         {
             // The group is not here at all, which is not the same as "here but not leading": the asker was
             // misdirected and should look elsewhere rather than conclude the group has no leader.
@@ -315,10 +316,10 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
         // could still be writing to its meta store or WAL after DisposeAsync considered that group gone --
         // RaftGroupInstance.DisposeAsync waits out whatever already got in, but only this closes the door on
         // anything new getting in behind it.
-        RaftGroupInstance[] instances = [.. _groups.Values];
+        Core.RaftGroupInstance[] instances = [.. _groups.Values];
         _groups.Clear();
 
-        foreach (RaftGroupInstance instance in instances)
+        foreach (Core.RaftGroupInstance instance in instances)
         {
             await instance.DisposeAsync().ConfigureAwait(false);
         }
@@ -337,13 +338,13 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
                 // The loop awaits each group in turn, so a node hosting ten thousand of them would otherwise
                 // put the administrative plane's heartbeat at the mercy of queue traffic — the one group
                 // whose responsiveness decides whether the node considers itself usable at all.
-                if (_groups.TryGetValue(RaftGroupId.Cluster, out RaftGroupInstance? cluster)
+                if (_groups.TryGetValue(RaftGroupId.Cluster, out Core.RaftGroupInstance? cluster)
                     && !await TickOneAsync(cluster).ConfigureAwait(false))
                 {
                     return;
                 }
 
-                foreach (KeyValuePair<RaftGroupId, RaftGroupInstance> pair in _groups)
+                foreach (KeyValuePair<RaftGroupId, Core.RaftGroupInstance> pair in _groups)
                 {
                     if (pair.Key == RaftGroupId.Cluster)
                     {
@@ -368,7 +369,7 @@ public sealed class MultiRaftHost : IRaftProtocolListener, IRaftClusterListener,
     }
 
     /// <summary>Ticks one group. Returns <see langword="false"/> when the loop should stop entirely.</summary>
-    private async ValueTask<bool> TickOneAsync(RaftGroupInstance instance)
+    private async ValueTask<bool> TickOneAsync(Core.RaftGroupInstance instance)
     {
         try
         {

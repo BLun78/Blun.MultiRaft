@@ -6,6 +6,7 @@
 
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Transport;

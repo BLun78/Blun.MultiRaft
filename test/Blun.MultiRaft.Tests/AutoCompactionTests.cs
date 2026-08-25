@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -31,7 +32,7 @@ public sealed class AutoCompactionTests
             await host.AddGroupAsync(Queue, membership, new RecordingStateMachine(), options);
         }
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 0; i < 25; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("msg-" + i));
@@ -44,7 +45,7 @@ public sealed class AutoCompactionTests
             TimeSpan.FromSeconds(2),
             "the group to be usable at all");
 
-        RaftGroupInstance? compacted = null;
+        Core.RaftGroupInstance? compacted = null;
         await TestCluster.WaitUntilAsync(
             () =>
             {
@@ -66,7 +67,7 @@ public sealed class AutoCompactionTests
             [1UL, 2UL, 3UL],
             _ => new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 0; i < 25; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("msg-" + i));
@@ -102,7 +103,7 @@ public sealed class AutoCompactionTests
             await host.AddGroupAsync(Queue, membership, null, options);
         }
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 0; i < 25; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("msg-" + i));

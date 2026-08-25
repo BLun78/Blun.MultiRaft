@@ -7,6 +7,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;

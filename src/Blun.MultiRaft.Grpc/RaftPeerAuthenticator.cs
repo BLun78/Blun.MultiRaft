@@ -6,6 +6,7 @@
 
 using System.Security.Cryptography;
 using System.Text;
+using Blun.MultiRaft.Core;
 
 namespace Blun.MultiRaft.Grpc;
 

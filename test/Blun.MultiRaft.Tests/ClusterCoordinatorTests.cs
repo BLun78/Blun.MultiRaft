@@ -7,6 +7,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using Blun.MultiRaft.Cluster;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
 
@@ -195,7 +196,7 @@ public sealed class ClusterCoordinatorTests
         RaftGroupId group = new(300);
         await cluster.CreateGroupEverywhereAsync(group);
 
-        RaftGroupInstance before = await cluster.WaitForGroupLeaderAsync(group);
+        Core.RaftGroupInstance before = await cluster.WaitForGroupLeaderAsync(group);
         NodeId wanted = cluster.Nodes.Select(n => n.Self).First(n => n != before.Self);
 
         LeaderTargetResponse response = await cluster.Nodes[0].Coordinator
@@ -204,7 +205,7 @@ public sealed class ClusterCoordinatorTests
         Assert.Equal(wanted, response.Node);
         Assert.True(response.Transferred, "the named target was eligible and should have taken over");
 
-        RaftGroupInstance after = await cluster.WaitForGroupLeaderAsync(group);
+        Core.RaftGroupInstance after = await cluster.WaitForGroupLeaderAsync(group);
         Assert.Equal(wanted, after.Self);
     }
 
@@ -301,7 +302,7 @@ public sealed class ClusterCoordinatorTests
                 [
                     .. cluster.Nodes
                         .Where(n => n.Self.Value != victim)
-                        .Where(n => n.Host.TryGetGroup(group, out RaftGroupInstance? g) && g is { IsLeader: true })
+                        .Where(n => n.Host.TryGetGroup(group, out Core.RaftGroupInstance? g) && g is { IsLeader: true })
                         .Select(n => n.Self),
                 ];
 
@@ -325,7 +326,7 @@ public sealed class ClusterCoordinatorTests
         RaftGroupId group = new(301);
         await cluster.CreateGroupEverywhereAsync(group);
 
-        RaftGroupInstance before = await cluster.WaitForGroupLeaderAsync(group);
+        Core.RaftGroupInstance before = await cluster.WaitForGroupLeaderAsync(group);
 
         // Nobody by this name is in the group. The requirement is not that this succeeds -- it is that the
         // group still has the leader it started with afterwards.

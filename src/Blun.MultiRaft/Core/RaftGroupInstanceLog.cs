@@ -6,7 +6,7 @@
 
 using Microsoft.Extensions.Logging;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 public sealed partial class RaftGroupInstance
 {

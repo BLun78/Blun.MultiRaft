@@ -10,7 +10,7 @@ using Blun.MultiRaft.Wal;
 using K4os.Compression.LZ4;
 using K4os.Compression.LZ4.Internal;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>
 /// Compresses payloads on the way into the log and expands them on the way out to the state machine.

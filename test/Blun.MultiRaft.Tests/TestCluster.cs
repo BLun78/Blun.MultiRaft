@@ -8,6 +8,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
@@ -87,25 +88,25 @@ internal sealed class TestCluster : IAsyncDisposable
         return membership;
     }
 
-    public RaftGroupInstance Group(ulong node, RaftGroupId group)
+    public Core.RaftGroupInstance Group(ulong node, RaftGroupId group)
     {
-        Assert.True(_hosts[new NodeId(node)].TryGetGroup(group, out RaftGroupInstance? instance));
+        Assert.True(_hosts[new NodeId(node)].TryGetGroup(group, out Core.RaftGroupInstance? instance));
         return instance!;
     }
 
-    public IEnumerable<RaftGroupInstance> GroupsOf(RaftGroupId group)
+    public IEnumerable<Core.RaftGroupInstance> GroupsOf(RaftGroupId group)
         => _hosts.Values
-            .Select(host => host.TryGetGroup(group, out RaftGroupInstance? g) ? g : null)
+            .Select(host => host.TryGetGroup(group, out Core.RaftGroupInstance? g) ? g : null)
             .Where(g => g is not null)!;
 
     /// <summary>Waits for the group to settle on exactly one leader and returns it.</summary>
-    public async ValueTask<RaftGroupInstance> WaitForLeaderAsync(RaftGroupId group, TimeSpan? timeout = null)
+    public async ValueTask<Core.RaftGroupInstance> WaitForLeaderAsync(RaftGroupId group, TimeSpan? timeout = null)
     {
-        RaftGroupInstance? leader = null;
+        Core.RaftGroupInstance? leader = null;
         await WaitUntilAsync(
             () =>
             {
-                RaftGroupInstance[] leaders = [.. GroupsOf(group).Where(g => g.IsLeader)];
+                Core.RaftGroupInstance[] leaders = [.. GroupsOf(group).Where(g => g.IsLeader)];
                 leader = leaders.Length == 1 ? leaders[0] : null;
                 return leader is not null;
             },

@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -19,7 +20,7 @@ public sealed class RaftGroupTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
 
         long index = await leader.AppendAsync(Encoding.UTF8.GetBytes("hello"));
 
@@ -33,7 +34,7 @@ public sealed class RaftGroupTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
 
         Assert.Single(cluster.GroupsOf(Queue), g => g.IsLeader);
         Assert.All(
@@ -51,7 +52,7 @@ public sealed class RaftGroupTests
             [1UL, 2UL, 3UL],
             node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
 
         for (int i = 1; i <= 20; i++)
         {
@@ -84,8 +85,8 @@ public sealed class RaftGroupTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance follower = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         await TestCluster.WaitUntilAsync(
             () => follower.LeaderId is not null,
@@ -105,7 +106,7 @@ public sealed class RaftGroupTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance first = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance first = await cluster.WaitForLeaderAsync(Queue);
         await first.AppendAsync(Encoding.UTF8.GetBytes("before-failover"));
 
         // Cut the old leader off in both directions: it is not dead, it is partitioned — the harder case,
@@ -116,7 +117,7 @@ public sealed class RaftGroupTests
             cluster.Network.Cut(other, first.Self);
         }
 
-        RaftGroupInstance second = null!;
+        Core.RaftGroupInstance second = null!;
         await TestCluster.WaitUntilAsync(
             () =>
             {
@@ -146,7 +147,7 @@ public sealed class RaftGroupTests
             await host.AddGroupAsync(Queue, initial, null, TestCluster.FastOptions);
         }
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         for (int i = 1; i <= 10; i++)
         {
             await leader.AppendAsync(Encoding.UTF8.GetBytes("pre-join-" + i));
@@ -161,7 +162,7 @@ public sealed class RaftGroupTests
         // Quorum is still 2 of 3: a learner must not move it, or adding one could stall the group.
         Assert.Equal(2, leader.Membership.QuorumSize);
 
-        RaftGroupInstance learner = cluster.Group(4, Queue);
+        Core.RaftGroupInstance learner = cluster.Group(4, Queue);
         await TestCluster.WaitUntilAsync(
             () => learner.LastIndex == leader.LastIndex,
             TimeSpan.FromSeconds(5),
@@ -187,7 +188,7 @@ public sealed class RaftGroupTests
             await host.AddGroupAsync(Queue, initial, null, TestCluster.FastOptions);
         }
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         var joiner = new NodeId(4);
 
         // Add the learner, then cut it off before it can catch up and pile on far more than the threshold.
@@ -209,7 +210,7 @@ public sealed class RaftGroupTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         NodeId victim = cluster.GroupsOf(Queue).First(g => !g.IsLeader).Self;
 
         Assert.Equal(2, leader.Membership.QuorumSize);
@@ -230,8 +231,8 @@ public sealed class RaftGroupTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL]);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance stale = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance stale = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         // Partition one follower, let the leader move on without it, then let it back in.
         cluster.Network.Cut(leader.Self, stale.Self);

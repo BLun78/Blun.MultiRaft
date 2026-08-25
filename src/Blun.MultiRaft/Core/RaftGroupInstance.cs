@@ -13,7 +13,7 @@ using Blun.MultiRaft.Wal;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>
 /// One Raft consensus group — in Blun.MQ, one queue. Everything that makes a group a group lives here: its
@@ -829,7 +829,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         }
 
         _backgroundWork.Add(Task.Run(
-            async () =>
+            (Func<Task?>)(async () =>
             {
                 try
                 {
@@ -849,7 +849,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     Volatile.Write(ref _campaignInFlight, 0);
                 }
-            }));
+            })));
 
         // No token passed to Task.Run: an already-cancelled token would skip the delegate entirely and
         // leave _campaignInFlight latched at 1 forever. Cancellation is observed inside the body instead.
@@ -2107,7 +2107,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         // host's state machine, not by this library -- holding the tick hostage to however long that takes
         // would reopen exactly the shutdown-latency problem PushToAllPeers had.
         _backgroundWork.Add(Task.Run(
-            async () =>
+            (Func<Task?>)(async () =>
             {
                 try
                 {
@@ -2127,7 +2127,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
                 {
                     Volatile.Write(ref _compactionInFlight, 0);
                 }
-            }));
+            })));
 
         // No token passed to Task.Run: the delegate is what clears _compactionInFlight, and Task.Run with an
         // already-cancelled token never runs its delegate at all -- the flag would latch at 1 forever.

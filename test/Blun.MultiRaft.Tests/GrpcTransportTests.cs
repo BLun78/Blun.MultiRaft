@@ -4,6 +4,7 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc;
 using Blun.MultiRaft.Grpc.Protocol;
 using Blun.MultiRaft.Transport;

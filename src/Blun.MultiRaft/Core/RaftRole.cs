@@ -4,7 +4,7 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>Role of a member within a single Raft group. Backed by <see cref="byte"/> so role transitions
 /// are plain <see cref="System.Threading.Interlocked"/> operations on an <see cref="int"/> field.</summary>

@@ -6,13 +6,13 @@
 
 using Blun.MultiRaft.Wal;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>
 /// How durable a leader's acknowledgement is, chosen per group.
 /// </summary>
 /// <remarks>
-/// Only <see cref="Quorum"/> is the Raft guarantee: once <see cref="RaftGroupInstance.AppendAsync"/> returns,
+/// Only <see cref="Quorum"/> is the Raft guarantee: once <see cref="Core.RaftGroupInstance.AppendAsync"/> returns,
 /// the entry survives any single node failing, including the leader. The other two levels return earlier and
 /// are correspondingly weaker — not "slightly less safe", but a caller-visible acknowledgement that can be
 /// contradicted after the fact. A client that received a successful <c>AppendAsync</c> and then observes the
@@ -67,14 +67,14 @@ public sealed class RaftGroupOptions
     /// <see cref="HeartbeatInterval"/>, busy or not.
     /// </summary>
     /// <remarks>
-    /// Real replication is never delayed by this: <see cref="RaftGroupInstance.AppendAsync"/> pushes to every
+    /// Real replication is never delayed by this: <see cref="Core.RaftGroupInstance.AppendAsync"/> pushes to every
     /// peer immediately regardless of the tick loop, so this only stretches the cadence of empty keep-alive
     /// heartbeats sent while nothing is happening. For a group that is idle for long stretches — most queues,
     /// most of the time — those empty heartbeats are pure 24/7 network cost with no data to show for it.
     /// <para>
     /// Must stay below <see cref="ElectionTimeout"/>, same as <see cref="HeartbeatInterval"/> — a follower's
     /// own timeout does not know this group went idle, so nothing about the safety margin between heartbeats
-    /// and elections changes, only how large that margin is allowed to be used. <see cref="RaftGroupInstance"/>'s
+    /// and elections changes, only how large that margin is allowed to be used. <see cref="Core.RaftGroupInstance"/>'s
     /// constructor throws <see cref="ArgumentOutOfRangeException"/> if it is set at or above
     /// <see cref="ElectionTimeout"/>, or below <see cref="HeartbeatInterval"/> (which would make it not idle
     /// at all). A group running <see cref="CheckQuorum"/> should leave extra margin: that check's own window
@@ -126,7 +126,7 @@ public sealed class RaftGroupOptions
 
     /// <summary>
     /// How many entries behind the leader a voter may be and still be reported as a legal leadership target by
-    /// <see cref="RaftGroupInstance.EvaluateLeaderTargetAsync"/>. <see langword="null"/> (the default) uses
+    /// <see cref="Core.RaftGroupInstance.EvaluateLeaderTargetAsync"/>. <see langword="null"/> (the default) uses
     /// <see cref="MaxEntriesPerAppend"/> — at most one replication round behind.
     /// </summary>
     /// <remarks>
@@ -165,7 +165,7 @@ public sealed class RaftGroupOptions
     public TimeSpan? LeaderTargetContactWindow { get; init; }
 
     /// <summary>
-    /// How long <see cref="RaftGroupInstance.TransferLeadershipAsync"/> waits for the target's log to reach
+    /// How long <see cref="Core.RaftGroupInstance.TransferLeadershipAsync"/> waits for the target's log to reach
     /// the leader's before giving up and sending nothing. <see langword="null"/> (the default) uses ten times
     /// <see cref="ElectionTimeout"/>.
     /// </summary>

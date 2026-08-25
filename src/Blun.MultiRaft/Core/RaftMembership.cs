@@ -8,7 +8,7 @@ using System.Buffers.Binary;
 using System.Collections.Immutable;
 using Blun.MultiRaft.Wal;
 
-namespace Blun.MultiRaft;
+namespace Blun.MultiRaft.Core;
 
 /// <summary>The single-server change kinds of Raft §4.1.</summary>
 public enum MembershipChangeKind : byte

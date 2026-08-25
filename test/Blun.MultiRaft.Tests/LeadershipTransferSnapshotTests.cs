@@ -5,6 +5,7 @@
 // for the full license text.
 
 using System.Text;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -27,8 +28,8 @@ public sealed class LeadershipTransferSnapshotTests
             [1UL, 2UL, 3UL],
             node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         // Strand the target behind a compacted prefix, exactly as the plain snapshot tests do, so the
         // transfer has to go through InstallSnapshot rather than ordinary AppendEntries to catch it up.
@@ -75,8 +76,8 @@ public sealed class LeadershipTransferSnapshotTests
             [1UL, 2UL, 3UL],
             node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         for (int i = 0; i < 10; i++)
         {
@@ -121,8 +122,8 @@ public sealed class LeadershipTransferSnapshotTests
             [1UL, 2UL, 3UL],
             node => machines[node] = new RecordingStateMachine());
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
-        RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance target = cluster.GroupsOf(Queue).First(g => !g.IsLeader);
 
         cluster.Network.Cut(leader.Self, target.Self);
         for (int i = 0; i < 35; i++)

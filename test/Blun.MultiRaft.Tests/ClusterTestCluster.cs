@@ -9,6 +9,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using Blun.MultiRaft.Cluster;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Transport;
 using Blun.MultiRaft.Wal;
@@ -264,16 +265,16 @@ internal sealed class ClusterTestCluster : IAsyncDisposable
         await WaitForGroupLeaderAsync(group);
     }
 
-    public async ValueTask<RaftGroupInstance> WaitForGroupLeaderAsync(RaftGroupId group, TimeSpan? timeout = null)
+    public async ValueTask<Core.RaftGroupInstance> WaitForGroupLeaderAsync(RaftGroupId group, TimeSpan? timeout = null)
     {
-        RaftGroupInstance? leader = null;
+        Core.RaftGroupInstance? leader = null;
         await WaitUntilAsync(
             () =>
             {
-                RaftGroupInstance[] leaders =
+                Core.RaftGroupInstance[] leaders =
                 [
                     .. _nodes
-                        .Select(n => n.Host.TryGetGroup(group, out RaftGroupInstance? g) ? g : null)
+                        .Select(n => n.Host.TryGetGroup(group, out Core.RaftGroupInstance? g) ? g : null)
                         .Where(g => g is { IsLeader: true })!,
                 ];
 

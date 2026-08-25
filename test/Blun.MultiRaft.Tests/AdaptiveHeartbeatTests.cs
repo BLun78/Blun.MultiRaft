@@ -4,6 +4,7 @@
 // Licensed under the MIT License. See the LICENSE file in the repository root
 // for the full license text.
 
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Wal;
 
 namespace Blun.MultiRaft.Tests;
@@ -62,7 +63,7 @@ public sealed class AdaptiveHeartbeatTests
         await using TestCluster cluster = await new TestCluster().WithNodesAsync(1, 2, 3);
         await cluster.AddGroupEverywhereAsync(Queue, [1UL, 2UL, 3UL], options: options);
 
-        RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
+        Core.RaftGroupInstance leader = await cluster.WaitForLeaderAsync(Queue);
         long termBeforeIdle = leader.CurrentTerm;
         NodeId leaderBeforeIdle = leader.Self;
 
