@@ -9,8 +9,19 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
     <RootNamespace>Blun.MultiRaft.Grpc</RootNamespace>
+    <!--
+      AnalysisLevel=latest in Directory.Build.props picks the rule *version*, not the rule *set*: most of the
+      CA18xx performance rules and CA2007 are off by default and stay off no matter how high the level goes.
+      Turned on here rather than repo-wide because solution-wide these two modes produce ~920 warnings, almost
+      all of them CA2007 in the demo and test projects, where ConfigureAwait is noise rather than a finding.
+      This is the one assembly that ships as a library onto someone else's thread pool, so it is the one that
+      has to hold the line, and with TreatWarningsAsErrors it does so at build time.
+    -->
+    <AnalysisModePerformance>All</AnalysisModePerformance>
+    <AnalysisModeReliability>All</AnalysisModeReliability>
     <PackageId>Blun.MultiRaft.Grpc</PackageId>
     <Description>gRPC transport for Blun.MultiRaft. One multiplexed bidirectional stream per node pair, carrying every group.</Description>
+    <PackageRequireLicenseAcceptance>True</PackageRequireLicenseAcceptance>
   </PropertyGroup>
 
   <ItemGroup>
