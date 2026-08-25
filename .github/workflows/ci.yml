@@ -59,6 +59,43 @@ jobs:
         # unverified on every platform. Same MTP invocation, the other target's build output.
         run: dotnet exec test/Blun.MultiRaft.Tests/bin/Release/net11.0/Blun.MultiRaft.Tests.dll -result-trx TestResults/net11.trx
 
+      # NativeAOT on Linux shells out to clang and links against zlib. Both are present on the current
+      # GitHub-hosted Ubuntu image, but that is an image detail rather than a promise, and its absence shows
+      # up as a link error at the very end of a two-minute ILC run. Windows uses the VS C++ toolchain and
+      # macOS the Xcode command line tools, both of which the hosted images do guarantee.
+      - name: Install NativeAOT prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      # IsAotCompatible on the libraries only enables Roslyn analyzers. They read that assembly's own IL, so
+      # they cannot see a dependency that starts reflecting in a later version, and they never prove the
+      # binary runs. This step is the part that does, in two stages: ILC fails the publish on any trim/AOT
+      # warning, and the probe binary then exercises the log -- append, flush, both truncations, reopen with
+      # the recovery scan and checksum verification -- asserting on what it reads back, across every checksum
+      # algorithm and both segment access modes. A wrong answer exits non-zero.
+      #
+      # Both target frameworks, for the same reason D-002 runs the test suite twice: net11.0 carries
+      # runtime-async=on, which changes how async methods are compiled, and "runtime-async under NativeAOT"
+      # is a combination nothing else in this repo covers.
+      #
+      # No -r: with PublishAot the SDK infers the host RID, which is what keeps this correct on all three
+      # runners, arm64 macOS included.
+      - name: AOT probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tfm in net10.0 net11.0; do
+            out="artifacts/aot/$tfm"
+            echo "::group::AOT publish $tfm"
+            dotnet publish test/Blun.MultiRaft.AotProbe/Blun.MultiRaft.AotProbe.csproj -c Release -f "$tfm" -o "$out"
+            echo "::endgroup::"
+            if [ -f "$out/Blun.MultiRaft.AotProbe.exe" ]; then
+              "$out/Blun.MultiRaft.AotProbe.exe"
+            else
+              "$out/Blun.MultiRaft.AotProbe"
+            fi
+          done
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

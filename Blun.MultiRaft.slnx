@@ -6,6 +6,7 @@
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/Blun.MultiRaft.Tests/Blun.MultiRaft.Tests.csproj" />
+    <Project Path="test/Blun.MultiRaft.AotProbe/Blun.MultiRaft.AotProbe.csproj" />
   </Folder>
   <Folder Name="/benchmark/">
     <Project Path="benchmark/Blun.MultiRaft.Benchmarks/Blun.MultiRaft.Benchmarks.csproj" />
