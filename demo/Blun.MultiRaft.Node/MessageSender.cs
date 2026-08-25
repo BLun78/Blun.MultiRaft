@@ -7,6 +7,7 @@
 using System.Collections.Concurrent;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Wal;
 

@@ -49,7 +49,7 @@ public sealed partial class RaftGroupInstance
         public static partial void MembershipChanged(
             ILogger logger,
             ulong group,
-            string change,
+            MembershipChangeKind change,
             ulong node,
             int voterCount);
 

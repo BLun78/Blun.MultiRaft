@@ -425,7 +425,9 @@ public sealed class GrpcRaftTransport : IRaftClusterTransport, IAsyncDisposable
             // DefaultVersionPolicy still have to live on HttpClient, not on either handler, and only one of
             // GrpcChannelOptions.HttpClient/.HttpHandler may be set, which is why the chain is wrapped into a
             // single HttpClient rather than passed as HttpHandler directly.
+#pragma warning disable CA2000 // Ownership passes to httpClient below, which disposes userAgentHandler in turn -- see the comment above.
             var userAgentHandler = new UserAgentHandler(RaftUserAgent.ForApplication(options.UserAgent)) { InnerHandler = handler };
+#pragma warning restore CA2000
 
             // Disposing the channel disposes this client, which disposes userAgentHandler, which disposes the
             // socket handler in turn.

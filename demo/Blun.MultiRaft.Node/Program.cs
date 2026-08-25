@@ -7,6 +7,7 @@
 using System.Globalization;
 using System.Net;
 using Blun.MultiRaft;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Node;

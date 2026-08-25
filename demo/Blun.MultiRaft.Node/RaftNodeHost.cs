@@ -7,6 +7,7 @@
 using System.Collections.Immutable;
 using System.Globalization;
 using Blun.MultiRaft.Cluster;
+using Blun.MultiRaft.Core;
 using Blun.MultiRaft.Grpc;
 using Blun.MultiRaft.Hosting;
 using Blun.MultiRaft.Transport;

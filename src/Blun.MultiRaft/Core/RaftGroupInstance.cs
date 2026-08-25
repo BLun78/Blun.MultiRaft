@@ -1338,7 +1338,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
             ballots.Remove(finished);
 
             VoteResponse response = finished.IsCompletedSuccessfully
-                ? finished.Result
+                ? await finished.ConfigureAwait(false)
                 : new VoteResponse(0, Granted: false);
 
             if (!preVote && response.Term > CurrentTerm)
@@ -1857,7 +1857,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         {
             Task<bool> finished = await Task.WhenAny(probes).ConfigureAwait(false);
             probes.Remove(finished);
-            if (finished.IsCompletedSuccessfully && finished.Result)
+            if (finished.IsCompletedSuccessfully && await finished.ConfigureAwait(false))
             {
                 confirmations++;
             }
@@ -2189,7 +2189,7 @@ public sealed partial class RaftGroupInstance : IAsyncDisposable
         Log.MembershipChanged(
             _logger,
             Group.Value,
-            change.Kind.ToString(),
+            change.Kind,
             change.Node.Value,
             updated.Voters.Length);
 
