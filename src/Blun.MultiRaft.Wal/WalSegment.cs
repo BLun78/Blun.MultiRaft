@@ -28,6 +28,10 @@ internal sealed class WalSegment : IDisposable
     private readonly List<int> _sizes;
     private readonly SegmentedRaftWalOptions _options;
 
+    /// <summary>Checksum width for this segment's algorithm. Constant per instance, so it is resolved once
+    /// rather than re-switched for every entry of every batch.</summary>
+    private readonly int _checksumSize;
+
     private IWalSegmentDevice? _device;
     private long _length;
 
@@ -47,6 +51,7 @@ internal sealed class WalSegment : IDisposable
         _offsets = offsets;
         _terms = terms;
         _sizes = sizes;
+        _checksumSize = WalChecksumStrategy.ChecksumSizeFor(options.ChecksumAlgorithm);
     }
 
     public string Path { get; }
@@ -261,11 +266,25 @@ internal sealed class WalSegment : IDisposable
         IWalSegmentDevice device = _device ?? throw new InvalidOperationException("Segment is not active.");
         await device.WriteAsync(packed, _length, cancellationToken).ConfigureAwait(false);
 
+        RecordBatch(entries.Span);
+    }
+
+    /// <summary>
+    /// Adds one index-map slot per entry of a batch that has just been written. Split out of
+    /// <see cref="AppendBatchAsync"/> so the span is taken once instead of per iteration — the
+    /// <see cref="ReadOnlyMemory{T}.Span"/> getter is a type check and a span construction, not a field read,
+    /// and an async method cannot hold the span in a local across its await.
+    /// </summary>
+    private void RecordBatch(ReadOnlySpan<RaftLogEntry> entries)
+    {
         long offset = _length;
-        for (int i = 0; i < entries.Length; i++)
+        _offsets.EnsureCapacity(_offsets.Count + entries.Length);
+        _terms.EnsureCapacity(_terms.Count + entries.Length);
+        _sizes.EnsureCapacity(_sizes.Count + entries.Length);
+
+        foreach (ref readonly RaftLogEntry entry in entries)
         {
-            ref readonly RaftLogEntry entry = ref entries.Span[i];
-            int size = RaftWalRecord.SizeOf(entry.Payload.Length, WalChecksumStrategy.ChecksumSizeFor(_options.ChecksumAlgorithm));
+            int size = RaftWalRecord.SizeOf(entry.Payload.Length, _checksumSize);
             _offsets.Add(offset);
             _terms.Add(entry.Term);
             _sizes.Add(size);

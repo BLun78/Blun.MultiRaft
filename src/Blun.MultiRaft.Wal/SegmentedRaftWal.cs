@@ -177,7 +177,7 @@ public sealed class SegmentedRaftWal : IRaftWal
         // AppendEntries writes on the receive path, and RaftStreamSession.HandleRequestAsync's catch list
         // (RpcException, InvalidOperationException, IOException) is what turns a rejection here into a
         // logged, session-preserving failure instead of an unobserved exception in a fire-and-forget task.
-        foreach (RaftLogEntry entry in entries.Span)
+        foreach (ref readonly RaftLogEntry entry in entries.Span)
         {
             if (entry.Payload.Length != entry.Header.PayloadLength)
             {
@@ -195,43 +195,28 @@ public sealed class SegmentedRaftWal : IRaftWal
         try
         {
             SaveConfig();
+            int checksumSize = _checksum.ChecksumSize;
             long last = _lastIndex;
             int i = 0;
             while (i < entries.Length)
             {
                 ReadOnlyMemory<RaftLogEntry> remaining = entries[i..];
-                EnsureDense(remaining.Span[0].Index);
 
-                int firstSize = RaftWalRecord.SizeOf(remaining.Span[0].Payload.Length, _checksum.ChecksumSize);
-                WalSegment segment = RollIfNeeded(remaining.Span[0].Index, firstSize);
+                // Headers are copied by value rather than held by reference: this method awaits, so nothing
+                // that aliases the span may stay alive across the write below.
+                RaftEntryHeader first = remaining.Span[0].Header;
+                EnsureDense(first.Index);
+
+                int firstSize = RaftWalRecord.SizeOf(first.PayloadLength, checksumSize);
+                WalSegment segment = RollIfNeeded(first.Index, firstSize);
                 long room = _options.SegmentSizeBytes - segment.Length;
 
-                // Coalesce as much of the batch as fits the current segment into one buffer: a replication
-                // message should cost one write, not one per entry. The split point is the segment boundary.
-                int bytes = 0;
-                int count = 0;
-                while (count < remaining.Length)
-                {
-                    int size = RaftWalRecord.SizeOf(remaining.Span[count].Payload.Length, _checksum.ChecksumSize);
-                    if (count > 0 && bytes + size > room)
-                    {
-                        break;
-                    }
-
-                    bytes += size;
-                    count++;
-                }
+                int count = CountThatFit(remaining.Span, room, checksumSize, out int bytes);
 
                 byte[] buffer = ArrayPool<byte>.Shared.Rent(bytes);
                 try
                 {
-                    int offset = 0;
-                    for (int k = 0; k < count; k++)
-                    {
-                        ref readonly RaftLogEntry entry = ref remaining.Span[k];
-                        offset += RaftWalRecord.Write(buffer.AsSpan(offset), entry.Header, entry.Payload.Span, _checksum);
-                    }
-
+                    int offset = Pack(remaining.Span[..count], buffer);
                     await segment.AppendBatchAsync(buffer.AsMemory(0, offset), remaining[..count], cancellationToken)
                         .ConfigureAwait(false);
                 }
@@ -240,7 +225,7 @@ public sealed class SegmentedRaftWal : IRaftWal
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
 
-                ref readonly RaftLogEntry tail = ref remaining.Span[count - 1];
+                RaftEntryHeader tail = remaining.Span[count - 1].Header;
                 last = tail.Index;
                 Advance(tail.Index, tail.Term);
                 i += count;
@@ -272,6 +257,54 @@ public sealed class SegmentedRaftWal : IRaftWal
         {
             _writeGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Counts how many leading entries of <paramref name="entries"/> fit in <paramref name="room"/> bytes
+    /// and reports their packed size. The first entry always counts, whether it fits or not — it is what
+    /// <see cref="RollIfNeeded"/> has already made room for, and refusing it here would loop forever.
+    /// </summary>
+    /// <remarks>
+    /// Synchronous and span-taking on purpose. Its caller awaits, so it cannot hold a span in a local;
+    /// indexing through <see cref="ReadOnlyMemory{T}.Span"/> instead would re-run the getter — a type check
+    /// and a span construction, not a field read — once per entry.
+    /// </remarks>
+    private int CountThatFit(ReadOnlySpan<RaftLogEntry> entries, long room, int checksumSize, out int bytes)
+    {
+        // Coalesce as much of the batch as fits the current segment into one buffer: a replication
+        // message should cost one write, not one per entry. The split point is the segment boundary.
+        int total = 0;
+        int count = 0;
+        while (count < entries.Length)
+        {
+            int size = RaftWalRecord.SizeOf(entries[count].Payload.Length, checksumSize);
+            if (count > 0 && total + size > room)
+            {
+                break;
+            }
+
+            total += size;
+            count++;
+        }
+
+        bytes = total;
+        return count;
+    }
+
+    /// <summary>
+    /// Writes every entry of <paramref name="entries"/> back to back into <paramref name="buffer"/> and
+    /// returns the bytes used. Split out of the append loop for the same reason as
+    /// <see cref="CountThatFit"/>.
+    /// </summary>
+    private int Pack(ReadOnlySpan<RaftLogEntry> entries, Span<byte> buffer)
+    {
+        int offset = 0;
+        foreach (ref readonly RaftLogEntry entry in entries)
+        {
+            offset += RaftWalRecord.Write(buffer[offset..], entry.Header, entry.Payload.Span, _checksum);
+        }
+
+        return offset;
     }
 
     /// <inheritdoc />
